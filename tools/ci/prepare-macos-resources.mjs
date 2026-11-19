@@ -40,6 +40,7 @@ const common = {
   webDir: path.join(repoRoot, "apps/web/dist"),
   npmPackageDir,
   trustedReleaseKeysFile: trustFile,
+  expectedClientVersion: version,
 };
 await prepareDesktopResources({ ...common, outputDir: first });
 const bundle = await buildReleaseBundle({

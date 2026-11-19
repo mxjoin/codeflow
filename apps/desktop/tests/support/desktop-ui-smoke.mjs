@@ -68,10 +68,9 @@ export async function closeInitialSettings(page) {
   await expect(settings).toBeHidden();
 }
 
-/** 沿顶部切换弹层打开原创建表单；返回可见对话框，不提交或绕过禁用状态。 */
+/** 沿顶部独立新建按钮打开工作区表单，不绕过界面禁用状态。 */
 export async function openCreateWorkspaceDialog(page) {
-  await page.getByRole("button", { name: /^切换工作区(?:，当前 .+)?$/ }).click();
-  await page.locator(".ws-compact-panel").getByRole("button", { name: "新建工作区", exact: true }).click();
+  await page.getByRole("button", { name: "新建工作区", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "新建工作区", exact: true });
   await expect(dialog).toBeVisible();
   return dialog;

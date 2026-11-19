@@ -1,4 +1,4 @@
-name: Desktop macOS DMG
+name: Desktop macOS DMG and installation
 
 on:
   workflow_dispatch:
@@ -8,15 +8,21 @@ permissions:
 
 jobs:
   dmg:
+    name: darwin-${{ matrix.arch }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-15
             arch: arm64
+          - runner: macos-15-intel
+            arch: x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22.23.2"
@@ -24,11 +30,37 @@ jobs:
         with:
           version: "10.14.0"
       - run: pnpm install --frozen-lockfile
+      - name: Check native runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: node -e "if(process.platform!=='darwin'||process.arch!==process.env.EXPECTED_ARCH)throw Error('MACOS_RUNNER_ARCH_MISMATCH')"
+      - name: Verify bundled npm resources
+        run: node --import tsx --test apps/desktop/tests/cli-runtime-resources.test.ts
+      - name: Prepare locked Electron runtime
+        run: node apps/desktop/node_modules/electron/install.js
       - name: Build ad-hoc signed DMG
-        run: bash tools/ci/build-macos-dmg.sh "$RUNNER_TEMP/dmg-${{ matrix.arch }}"
+        id: build
+        run: |
+          mkdir -p "$RUNNER_TEMP/desktop-package"
+          bash tools/ci/build-macos-dmg.sh "$RUNNER_TEMP/desktop-package/installers"
+      - name: Install and launch the desktop App twice
+        id: verify
+        timeout-minutes: 8
+        run: node tools/ci/verify-desktop-install.mjs "$RUNNER_TEMP/desktop-package" "$RUNNER_TEMP/desktop-verification"
       - name: Upload DMG
+        if: ${{ always() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: CodeFlowAI-macos-${{ matrix.arch }}
-          path: ${{ runner.temp }}/dmg-${{ matrix.arch }}/*
+          path: |
+            ${{ runner.temp }}/desktop-package/installers/*.dmg
+            ${{ runner.temp }}/desktop-package/build.json
+            ${{ runner.temp }}/desktop-package/SHA256SUMS
+          if-no-files-found: error
+      - name: Upload installation evidence
+        if: ${{ always() && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure' || steps.verify.outcome == 'cancelled') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-verification-${{ matrix.arch }}
+          path: ${{ runner.temp }}/desktop-verification/report/
           if-no-files-found: error
