@@ -17,9 +17,9 @@ import { resolveDesktopStorageLocation, persistDesktopStorageLocation, completeD
 import { EventEmitter } from "node:events";
 import type { ProcessIdentity } from "../src/windowsProcessIdentity.js";
 
-/** 创建测试自有安装元数据与普通目录，不触碰真实profile或已安装程序。 */
+/** 在真实临时路径创建独占安装夹具，避免 Mac 路径别名触发存储拒绝。 */
 async function fixture(t: test.TestContext) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cf-d16-startup-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cf-d16-startup-")));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const userDataDir = path.join(root, "user-data"), installRoot = path.join(root, "install"), custom = path.join(root, "private-data");
   await fs.mkdir(userDataDir); await fs.mkdir(installRoot); await fs.writeFile(path.join(installRoot, "CodeFlowAI.exe"), "fixture");
@@ -27,7 +27,7 @@ async function fixture(t: test.TestContext) {
   return { root, userDataDir, installRoot, custom };
 }
 
-/** 执行实际main；原生打包模式保留真实argv及安装事实，暴露实际退出供超时等待。 */
+/** 按指定平台执行实际 main，原生打包模式保留 argv、安装事实和退出结果。 */
 async function runMain(f: Awaited<ReturnType<typeof fixture>>, env: Record<string, string> = {}, interrupt = false,
   options: { locked?: boolean; kind?: "ordinary" | "held-candidate" | "recovery-control"; initialize?: boolean; cleanupFailure?: Error;
     onStart?: () => Promise<void>; runtimeStatus?: string; heldShell?: boolean; candidate?: boolean; earlyQuit?: boolean; quitDuringAdmission?: boolean;
@@ -38,7 +38,7 @@ async function runMain(f: Awaited<ReturnType<typeof fixture>>, env: Record<strin
     maintenanceSecondInstance?: boolean; leftoverClient?: boolean; processQueryFailure?: Error;
     processRows?: ProcessIdentity[]; processSelf?: Partial<ProcessIdentity>; executablePath?: string;
     browserGate?: Promise<void>; browserStorageGate?: Promise<void>; browserStorageRejection?: unknown;
-    browserTimeout?: boolean; activeReleaseFailure?: Error; nativePackaged?: boolean; onHandoff?: () => Promise<void> } = {}) {
+    browserTimeout?: boolean; activeReleaseFailure?: Error; nativePackaged?: boolean; onHandoff?: () => Promise<void>; platform?: NodeJS.Platform } = {}) {
   const source = await fs.readFile(new URL("../src/main.ts", import.meta.url), "utf8");
   const ast = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const declarations = ast.statements.filter(ts.isVariableStatement).filter(statement => statement.declarationList.declarations.some(declaration =>
@@ -76,6 +76,8 @@ async function runMain(f: Awaited<ReturnType<typeof fixture>>, env: Record<strin
     Menu: {
       /** 记录实际main传入的菜单参数，验证菜单移除边界。 */
       setApplicationMenu(menu: unknown) { menuCalls.push(menu); },
+      /** Mac 菜单只记录模板，保留真实启动入口的调用。 */
+      buildFromTemplate(template: unknown) { return template; },
     },
     resolveActiveRelease: async () => { if (options.activeReleaseFailure) throw options.activeReleaseFailure; return null; },
     resolveBaselineRelease: async () => ({ releaseDir: f.installRoot }), resolveVersionedShellStartup: async () => null,
@@ -143,7 +145,7 @@ async function runMain(f: Awaited<ReturnType<typeof fixture>>, env: Record<strin
       if (options.quitDuringAdmission) { listeners.get("before-quit")!({ preventDefault() { throw new Error("UNEXPECTED_QUIT_BLOCKED"); } }); setImmediate(done); }
     },
     currentDirectory: path.join(f.installRoot, "dist"),
-    process: { versions: { electron: "test" }, env, platform: options.maintenance || options.installation || options.nativePackaged ? "win32" : "linux", resourcesPath: f.installRoot,
+    process: { versions: { electron: "test" }, env, platform: options.platform ?? (options.maintenance || options.installation || options.nativePackaged ? "win32" : "linux"), resourcesPath: f.installRoot,
       execPath: executablePath, pid: 1, ppid: 2,
       argv: mainArgv },
     app: { isPackaged: !!options.maintenance || !!options.installation || !!options.nativePackaged, getPath: (name: string) => name === "userData" ? f.userDataDir : path.join(f.userDataDir, name),
@@ -227,6 +229,23 @@ async function runMain(f: Awaited<ReturnType<typeof fixture>>, env: Record<strin
   return { events, dataDirectories, shown, exits, menuCalls, workerRequests, retiredShellAttempts, settled: exitFlight,
     windowListeners: [window.listenerCount("maximize"), window.listenerCount("unmaximize")] };
 }
+
+// Mac 在首次及已有数据的启动中都不进入 Windows 壳交接，安装身份保持一致。
+test("macOS ordinary startup preserves initialized storage on the second launch", async t => {
+  const f = await fixture(t);
+  const options = { platform: "darwin" as const, initialize: true,
+    onHandoff: async () => { assert.fail("macOS must not enter Windows shell handoff"); } };
+  const first = await runMain(f, { CODEFLOWAI_DESKTOP_DATA_DIR: f.custom }, false, options);
+  assert.deepEqual(first.shown, []);
+  assert.ok(first.events.includes("start") && first.events.includes("updates"));
+  const locator = await fs.readFile(path.join(f.userDataDir, "desktop-data-location.json"));
+  const identity = await fs.readFile(path.join(f.custom, "device-identity.json"));
+  const second = await runMain(f, {}, false, options);
+  assert.deepEqual(second.shown, []);
+  assert.ok(second.events.includes("start") && second.events.includes("updates"));
+  assert.deepEqual(await fs.readFile(path.join(f.userDataDir, "desktop-data-location.json")), locator);
+  assert.deepEqual(await fs.readFile(path.join(f.custom, "device-identity.json")), identity);
+});
 
 /** 即使用例提前失败，也释放测试gate并有界等待真实main结算；拒绝继续向测试框架传播。 */
 function observeTimeout(t: test.TestContext, release: () => void, flight: ReturnType<typeof runMain>) {

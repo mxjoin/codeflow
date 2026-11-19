@@ -650,14 +650,14 @@ if (process.versions.electron) {
         }
         fs.unlinkSync(installationMarker.file);
       }
-      // 先读唯一attempt；磁盘或启动参数不能改指既有真实profile，也不能绕过恢复控制启动Client。
+      // macOS 不使用 Windows 壳交接；其他入口仍先核对唯一 attempt。
       const handoffInput = { executablePath: process.execPath, pid: process.pid, parentPid: process.ppid, dataDir,
         userDataDir, sessionDataDir, argv: process.argv, channel: process };
       if (maintenanceRequest) maintenanceStage = "handoff";
       const nativeShellStartup = app.isPackaged && process.platform === "win32" && !maintenanceRequest
         && !process.argv.includes("--codeflow-shell-handoff")
         && fs.existsSync(path.join(executableDirectory, "resources", "shell-switch.exe"));
-      let handoffStartup = nativeShellStartup || maintenanceRequest && location.clientId === null
+      let handoffStartup = process.platform === "darwin" || nativeShellStartup || maintenanceRequest && location.clientId === null
         ? { kind: "ordinary" as const } : await readShellHandoffStartup(handoffInput);
       if (maintenanceRequest && handoffStartup.kind !== "ordinary") throw new DesktopMaintenanceStartupError("DESKTOP_UNINSTALL_HANDOFF_PENDING");
       if (handoffStartup.kind === "held-candidate") {

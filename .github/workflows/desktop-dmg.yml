@@ -36,6 +36,8 @@ jobs:
         run: node -e "if(process.platform!=='darwin'||process.arch!==process.env.EXPECTED_ARCH)throw Error('MACOS_RUNNER_ARCH_MISMATCH')"
       - name: Verify bundled npm resources
         run: node --import tsx --test apps/desktop/tests/cli-runtime-resources.test.ts
+      - name: Verify macOS restart boundary
+        run: node --conditions=development --import tsx --test --test-name-pattern="macOS ordinary startup" apps/desktop/tests/desktop-startup-storage.test.ts
       - name: Prepare locked Electron runtime
         run: node apps/desktop/node_modules/electron/install.js
       - name: Build ad-hoc signed DMG
