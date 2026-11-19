@@ -45,6 +45,6 @@ tar -chzf "$work/client.tgz" -C "$work/client-pack" package
 
 node tools/ci/prepare-macos-resources.mjs "$work/client.tgz" "$work/npm12/node_modules/npm" "$work"
 
-pnpm -C apps/desktop package:local:mac -- \
+node apps/desktop/scripts/package-local-mac.mjs \
   "$repo_root/apps/desktop/dist/resources" "$output" --require-baseline-proof --target dmg
 node tools/ci/record-desktop-package.mjs "$output"
