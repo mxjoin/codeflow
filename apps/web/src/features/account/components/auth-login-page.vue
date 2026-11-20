@@ -367,6 +367,24 @@ async function submit() {
   box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15);
 }
 
+/* 系统深色未写 data-theme 时，验证码输入框与页面其它输入框保持一致。 */
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme])) .auth-login__captcha :deep(.numeric-captcha__input) {
+    background: #141414;
+    border-color: #424242;
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  :global(:root:not([data-theme])) .auth-login__captcha :deep(.numeric-captcha__input::placeholder) {
+    color: rgba(255, 255, 255, 0.25);
+  }
+
+  :global(:root:not([data-theme])) .auth-login__captcha :deep(.numeric-captcha__input:focus) {
+    border-color: #d97757;
+    box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15);
+  }
+}
+
 .auth-login__office {
   display: grid;
   gap: 12px;

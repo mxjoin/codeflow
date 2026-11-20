@@ -43,9 +43,9 @@ function setup(status: "restored" | "cancelled" | "failed", realConfig?: ReturnT
     takeMigrationAccount: () => { takes++; taking(); return migration ? migration.takeAccount() : take; },
     async acknowledgeMigrationAccount() { await migration?.acknowledgeAccount(); acknowledgements++; } };
   const code = ts.transpileModule(script, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  const exposed = {} as { error: () => string | null; showNotice: () => boolean; openLogin: () => void; dismiss: () => void; label: () => string };
+  const exposed = {} as { error: () => string | null; showNotice: () => boolean; deferredNotice: () => string | null; openLogin: () => void; dismiss: () => void; label: () => string };
   const errors: unknown[] = [];
-  vm.runInNewContext(code + '\nexports.error = () => actionError.value; exports.showNotice = () => showAccountNotice.value; exports.openLogin = openAccountLogin; exports.dismiss = dismissAccountNotice; exports.label = () => stageLabel.value;', { exports: exposed, URL,
+  vm.runInNewContext(code + '\nexports.error = () => actionError.value; exports.showNotice = () => showAccountNotice.value; exports.deferredNotice = () => deferredMigrationNotice.value; exports.openLogin = openAccountLogin; exports.dismiss = dismissAccountNotice; exports.label = () => stageLabel.value;', { exports: exposed, URL,
     console: { error: (...args: unknown[]) => { errors.push(args); } },
     defineEmits: () => (event: string) => { if (event === "ready") ready++; },
     defineProps: () => ({ startupLabel }),
@@ -58,13 +58,47 @@ function setup(status: "restored" | "cancelled" | "failed", realConfig?: ReturnT
       throw new Error(`unexpected component dependency: ${id}`);
     } });
   return { config, state, takeStarted, run: () => mounted(), send: (value: DesktopMigrationState) => listener(value), resolveTake,
-    error: exposed.error, showNotice: exposed.showNotice, openLogin: exposed.openLogin, dismiss: exposed.dismiss, label: exposed.label, errors, counts: () => ({ acknowledgements, ready, takes }) };
+    error: exposed.error, showNotice: exposed.showNotice, deferredNotice: exposed.deferredNotice,
+    openLogin: exposed.openLogin, dismiss: exposed.dismiss, label: exposed.label, errors, counts: () => ({ acknowledgements, ready, takes }) };
 }
 
 test("可见启动层显示工作台的真实升级阶段，不被迁移完成态隐藏", async () => {
   const f = setup("cancelled", undefined, undefined, "正在切换新版本");
   await f.run();
   assert.equal(f.label(), "正在切换新版本");
+});
+
+test("旧Server不可达自动放行后，工作台就绪时提示旧数据已保留", async () => {
+  const state: DesktopMigrationState = { status: "ready", migrationId: null, candidateId: null, workspaceCount: 0,
+    stage: "completed", completed: 0, total: null, errorCode: "SOURCE_ACCOUNT_UNRESOLVED",
+    message: "旧 Client 所属 Server 暂不可用，旧数据已保留；未迁移旧数据，新桌面将继续启动。",
+    account: { status: "not_requested", errorCode: null, message: null } };
+  const f = setup("cancelled", undefined, { snapshot: () => state, subscribe: () => () => {} } as unknown as ReturnType<typeof createLegacyClientMigration>);
+  await f.run();
+  assert.equal(f.counts().ready, 1);
+  assert.equal(f.deferredNotice(), state.message);
+  assert.equal(f.showNotice(), true);
+});
+
+test("旧 Server 不可达时自动保留旧数据并进入新桌面，工作台就绪后显示提示", async t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-offline-skip-"));
+  const migration = createLegacyClientMigration({ dataDir, workerEntry: "unused",
+    identity: { deviceId: "22222222-2222-4222-8222-222222222222", createdAt: new Date().toISOString(), publicKeyBase64: "fixture" },
+    execute: async () => { throw Object.assign(new Error("source Server unavailable"), { code: "SOURCE_ACCOUNT_UNRESOLVED" }); } });
+  t.after(async () => { await migration.stop(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  const preparing = migration.prepare();
+  await migration.whenDiscovered();
+  await preparing;
+  assert.equal(migration.snapshot().status, "running");
+  await migration.runtimeReady();
+  assert.equal(migration.snapshot().status, "ready");
+
+  const f = setup("cancelled", undefined, migration);
+  await f.run();
+  assert.equal(f.counts().ready, 1);
+  assert.equal(f.counts().takes, 1);
+  assert.match(f.deferredNotice() ?? "", /旧数据已保留/u);
+  assert.match(f.deferredNotice() ?? "", /未迁移旧数据/u);
 });
 
 /** 安装真实 Pinia 持久化插件，存储故障只施加于既有 config key。 */

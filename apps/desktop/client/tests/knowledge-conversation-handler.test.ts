@@ -108,7 +108,7 @@ applyEngineModelCatalogSnapshot({
 test.after(() => resetEngineModelCatalogRuntimeForTest());
 
 /** 使用迁移后的工作区 DB 和 API 分发；仅替换不调用真实 AI 的引擎 session。 */
-function setupHarness(options: { ordinary?: boolean; staleDynamicBinding?: boolean; knowledgeEnabled?: boolean; toolTransport?: "native-dynamic" | "protocol" } = {}) {
+function setupHarness(options: { ordinary?: boolean; staleDynamicBinding?: boolean; knowledgeEnabled?: boolean; toolTransport?: "native-dynamic" | "protocol"; validateEvidence?: boolean } = {}) {
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "codeflowai-knowledge-handler-"));
   const application = openClientDb({ dbPath: path.join(workspacePath, "client.db") });
   application.workspaces.upsert({ id: WORKSPACE_ID, title: "项目知识接入测试", path: workspacePath });
@@ -155,6 +155,14 @@ function setupHarness(options: { ordinary?: boolean; staleDynamicBinding?: boole
           accessMode: input.accessMode ?? "current",
           toolInput: options.ordinary ? { nodeId: "feature", expectedHash: store.currentHash("feature"), content: "# 修改建议", summary: "补充已确认需求", sources: [{ kind: "requirement", requirement: "用户确认的功能补充", relation: "用户要求" }] } : { nodes: [{ id: "features", parentId: "knowledge-architecture", title: "业务功能", orderKey: "01", summary: "项目功能说明", tags: [], instructions: "按页面和按钮整理", sourceScope: [] }], rationale: "根据当前项目和用户要求整理目录", gaps: [] },
         });
+      }
+      if (options.validateEvidence) {
+        const eventBase = { ts: Date.now(), workspaceId: WORKSPACE_ID, threadId: THREAD_ID, engine: "codex" } as const;
+        emitters.conversation({ ...eventBase, type: "item.tool.started", payload: { itemId: "run-real-boundary", toolName: "commandExecution", input: { command: "node --test" } } } as ConversationEventInput);
+        emitters.conversation({ ...eventBase, type: "item.tool.completed", payload: { itemId: "run-real-boundary", toolName: "commandExecution", status: "failed", output: { exitCode: 1, stdout: "expected no write after failure" } } } as ConversationEventInput);
+        toolResult = await input.executeHostTool!({ toolId: "knowledge.acceptance.record" as any, accessMode: input.accessMode ?? "current", toolInput: {
+          checks: [{ nodeId: null, requirement: "失败时停止后续写入", method: "失败分支测试", evidenceItemIds: ["run-real-boundary"] }],
+        } });
       }
       emitters.raw({ ts: Date.now(), workspaceId: WORKSPACE_ID, threadId: THREAD_ID, engine: "codex", source: "codex.app-server.msg", data: { method: "item/tool/completed", params: { turnId: input.turnId, toolName: "knowledge.plan.submit" } }, handled: true, action: "mapped", emittedTypes: [] });
       emitters.conversation({ ts: Date.now(), workspaceId: WORKSPACE_ID, threadId: THREAD_ID, engine: "codex", type: "item.agentMessage.completed", payload: { turnId: input.turnId, itemId: input.assistantItemId, engineMessageId: "provider-agent-result", text: "目录计划已提交，请在知识页采用。", revision: 1 } } as ConversationEventInput);
@@ -283,6 +291,35 @@ test("普通会话提案立即可审批且正常完成回合，人工审核通�
     // 提交结果提示已改为「文档修改建议」并附待确认更新入口。
     assert.ok(h.sent.some(event => event.t === "conversation.event" && event.event.type === "item.agentMessage.completed" && event.event.payload.text.includes("本轮已提交 1 项文档修改建议")));
     assert.equal(h.sent.some(event => event.t === "conversation.event" && String(event.event.type) === "approval.requested"), false);
+  } finally { h.cleanup(); }
+});
+
+test("普通发送链记录实际规格并从引擎事件核定失败证据，不接受模型自述通过", async () => {
+  const h = setupHarness({ ordinary: true, validateEvidence: true });
+  try {
+    const turnId = "turn-specification-evidence" as TurnId;
+    const response = await h.request("send-evidence", "threads.sendMessage", { workspaceId: WORKSPACE_ID, threadId: THREAD_ID, turnId,
+      text: "失败时停止后续写入", inputKind: "message", model: "gpt-test", effort: "high", accessMode: "full-access",
+      knowledgeConversationActorContext: { userId: ACTOR.userId, permissionScope: ACTOR.permissionScope },
+    });
+    assert.equal(response?.status, 200);
+    assert.equal((await h.waitTerminal(turnId)).status, "completed");
+    assert.ok(h.engineInputs[0]?.toolRegistry?.tools.some(tool => tool.toolId === "knowledge.acceptance.record"));
+    const record = h.toolResult as { ok: boolean; output: { checks: Array<{ status: string }>; acceptance: string } };
+    assert.equal(record.ok, true);
+    assert.equal(record.output.checks[0]?.status, "failed");
+    assert.equal(record.output.acceptance, "needs_review");
+    assert.ok(h.sent.some(message => message.t === "conversation.event" && message.event.type === "item.tool.completed" && message.event.payload.toolName === "项目规格已提供"));
+    assert.ok(h.sent.some(message => message.t === "conversation.event" && message.event.type === "item.tool.completed" && message.event.payload.toolName === "规格验证依据"));
+    const continuedTurnId = "turn-specification-evidence-continued" as TurnId;
+    const continued = await h.request("continue-evidence", "threads.sendMessage", { workspaceId: WORKSPACE_ID, threadId: THREAD_ID, turnId: continuedTurnId,
+      text: "继续", inputKind: "message", model: "gpt-test", effort: "high", accessMode: "full-access",
+      knowledgeConversationActorContext: { userId: ACTOR.userId, permissionScope: ACTOR.permissionScope },
+    });
+    assert.equal(continued?.status, 200);
+    assert.equal((await h.waitTerminal(continuedTurnId)).status, "completed");
+    assert.equal((h.toolResult as typeof record).ok, true);
+    assert.equal((h.toolResult as typeof record).output.checks[0]?.status, "failed");
   } finally { h.cleanup(); }
 });
 

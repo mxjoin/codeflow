@@ -174,7 +174,8 @@ test("transport sends signed requests only to its configured origin and verifies
     const transport = createDesktopUpdateTransport({ dataDir, identity, configuredServerOrigin: origin });
     await transport.register();
     assert.deepEqual(registrationBody, { deviceId: identity.deviceId, publicKeyBase64: identity.publicKeyBase64,
-      platform: process.platform, arch: process.arch });
+      platform: process.platform, arch: process.arch,
+      shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" });
     await transport.request({ method: "GET", path: "/api/software/desktop/check?arch=x64", range: "bytes=1-", ifMatch: '"digest"' });
     await assert.rejects(() => transport.request({ method: "GET", path: "/api/software/desktop/redirect" }));
     assert.equal(calls, 3);
@@ -216,7 +217,8 @@ test("registration reads the current shell platform at request time and rejects 
       Object.defineProperty(process, "platform", { ...originalPlatform, value: platform });
       Object.defineProperty(process, "arch", { ...originalArch, value: arch });
       await validTransport.register();
-      assert.deepEqual(registrations.at(-1), { deviceId: identity.deviceId, publicKeyBase64: identity.publicKeyBase64, platform, arch });
+      assert.deepEqual(registrations.at(-1), { deviceId: identity.deviceId, publicKeyBase64: identity.publicKeyBase64, platform, arch,
+        shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" });
     }
     for (const [platform, arch] of [["linux", "x64"], ["win32", "arm64"], ["darwin", "ia32"]]) {
       Object.defineProperty(process, "platform", { ...originalPlatform, value: platform });

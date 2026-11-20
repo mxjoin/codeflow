@@ -30,6 +30,37 @@ function createProject(): { root: string; store: KnowledgeAssetStore } {
   return { root, store: new KnowledgeAssetStore(root) };
 }
 
+test("人工保存相同正文和来源保留正式版本及候选基线，行尾差异不制造版本", t => {
+  const { root, store } = createProject();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  store.saveTree({ schemaVersion: 3, instructions: "", nodes: defaultTreeNodes() }, null);
+  const source = store.readSource("src/members.ts");
+  const sources = [{ kind: "code", path: source.path, contentHash: source.contentHash, relation: "统一实现入口" }];
+  const first = store.saveDocument({ nodeId: "knowledge-spec-coding", content: "# 编码规范\n\n复用已有入口。\n", sources, expectedHash: null, origin: "manual", adopt: true });
+  const expectedHash = store.currentHash(first.nodeId);
+  const saved = store.saveDocument({ nodeId: first.nodeId, content: "# 编码规范\r\n\r\n复用已有入口。\r\n", sources, expectedHash, origin: "manual", summary: "再次保存", adopt: true });
+  assert.equal(saved.id, first.id);
+  assert.equal(store.currentHash(first.nodeId), expectedHash);
+  assert.equal(store.revisions(first.nodeId).length, 1);
+  assert.deepEqual(store.detail(first.nodeId).current?.sources, sources);
+  assert.throws(() => store.saveDocument({ nodeId: first.nodeId, content: "# 编码规范\n\n复用已有入口。\n", sources, expectedHash: "0".repeat(64), origin: "manual", adopt: true }), { code: "KNOWLEDGE_ASSET_CONFLICT" });
+});
+
+test("人工修改正文或来源仍保存新版本，未传生成指令时保留原版本要求", t => {
+  const { root, store } = createProject();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  store.saveTree({ schemaVersion: 3, instructions: "", nodes: defaultTreeNodes() }, null);
+  const first = store.saveDocument({ nodeId: "knowledge-spec-coding", content: "失败明确抛出。", sources: [], instructions: "保留失败边界", expectedHash: null, origin: "manual", adopt: true });
+  const updated = store.saveDocument({ nodeId: first.nodeId, content: "失败明确抛出，停止后续副作用。", sources: [], expectedHash: store.currentHash(first.nodeId), origin: "manual", adopt: true });
+  assert.notEqual(updated.id, first.id);
+  assert.equal(updated.instructions, "保留失败边界");
+  assert.equal(updated.baseRevisionId, first.id);
+  const evidence = [{ kind: "requirement", requirement: "失败时停止后续副作用。", relation: "用户明确要求" }];
+  const changed = store.saveDocument({ nodeId: first.nodeId, content: "失败明确抛出，停止后续副作用。", sources: evidence, expectedHash: store.currentHash(first.nodeId), origin: "manual", adopt: true });
+  assert.notEqual(changed.id, updated.id);
+  assert.deepEqual(store.detail(first.nodeId).current?.sources, evidence);
+});
+
 test("同步只读检查复用文件与安全路径，嵌套检查保持读取上限且下次读取外部新内容", t => {
   const { root, store } = createProject();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

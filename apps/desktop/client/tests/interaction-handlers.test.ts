@@ -277,8 +277,10 @@ test("普通会话审批后续跑沿用开启的知识库工具和 required 传�
     assert.match(input.systemMessage ?? "", /knowledge\.tree\.read/);
     assert.ok(input.toolRegistry?.tools.some(tool => tool.toolId === "knowledge.tree.read"));
     assert.ok(input.toolRegistry?.tools.some(tool => tool.toolId === "knowledge.change.propose"));
+    assert.ok(input.toolRegistry?.tools.some(tool => tool.toolId === "knowledge.acceptance.record"));
     harness.completeFollowUp();
     await waitFor(() => harness.db.turns.get(input.turnId)?.status === "completed", "知识续跑未完成");
+    assert.ok(harness.sent.some(message => message.t === "conversation.event" && message.event.type === "item.tool.completed" && message.event.payload.toolName === "项目规格已提供"));
   } finally { harness.cleanup(); }
 });
 

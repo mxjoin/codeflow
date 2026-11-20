@@ -1637,10 +1637,11 @@ test("start wires the local identity receipt journal and delivery for pending re
   const app = createDesktopApplication({ dataDir: f.dataDir, initialReleaseDir: f.dataDir, host: f.host, configuredServerOrigin: origin, createRuntime: () => f.runtime });
   await app.start();
   assert.deepEqual(await journal.pending(identity.deviceId), [receipt]);
-  assert.deepEqual(requests, []);
+  assert.deepEqual(requests.filter(url => url !== "/api/software/desktop/devices/register"), []);
   await app.reportReceipt(receipt);
   assert.deepEqual(await journal.pending(identity.deviceId), []);
-  assert.deepEqual(requests, ["/api/software/desktop/devices/register", "/api/software/desktop/update-receipts"]);
+  assert.deepEqual(requests.filter(url => url !== "/api/software/desktop/devices/register"), ["/api/software/desktop/update-receipts"]);
+  assert.ok(requests.some(url => url === "/api/software/desktop/devices/register"));
   await app.exit();
 });
 
@@ -1653,7 +1654,7 @@ test("a stalled remote error delivery does not hold local startup or normal exit
   const gate = new Promise<void>(resolve => { release = resolve; });
   const sending = new Promise<void>(resolve => { entered = resolve; }), reporting = new Promise<void>(resolve => { reported = resolve; });
   t.mock.method(globalThis, "fetch", async () => { entered(); await gate; throw new Error("TEST_REPORT_OFFLINE"); });
-  f.host.onUpdateError = (_error, context) => { assert.equal(context.logOnly, true); reported(); };
+  f.host.onUpdateError = (_error, context) => { assert.equal(context.logOnly, true); if (context.requestId !== "device-presence") reported(); };
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const app = createDesktopApplication({ dataDir: f.dataDir, initialReleaseDir: f.dataDir, host: f.host,
     configuredServerOrigin: "https://report.invalid", createRuntime: () => f.runtime });
@@ -1695,12 +1696,13 @@ test("start flushes existing update failures once after local Web health", async
   const app = createDesktopApplication({ dataDir: f.dataDir, initialReleaseDir: f.dataDir, host: f.host,
     configuredServerOrigin: `http://127.0.0.1:${(server.address() as { port: number }).port}`, createRuntime: () => f.runtime });
   await app.start();
-  assert.deepEqual(requests, []);
+  assert.deepEqual(requests.filter(url => url !== "/api/software/desktop/devices/register"), []);
   await app.flushFailures();
-  assert.deepEqual(requests, ["/api/software/desktop/devices/register", "/api/software/desktop/update-failures"]);
+  assert.deepEqual(requests.filter(url => url !== "/api/software/desktop/devices/register"), ["/api/software/desktop/update-failures"]);
+  assert.ok(requests.some(url => url === "/api/software/desktop/devices/register"));
   assert.deepEqual(journal.pending(identity.deviceId), []);
   await app.flushFailures();
-  assert.deepEqual(requests, ["/api/software/desktop/devices/register", "/api/software/desktop/update-failures"]);
+  assert.deepEqual(requests.filter(url => url !== "/api/software/desktop/devices/register"), ["/api/software/desktop/update-failures"]);
   assert.equal(record.requestId, "failure-request");
   await app.exit();
 });

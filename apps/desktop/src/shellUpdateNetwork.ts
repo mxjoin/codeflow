@@ -31,6 +31,11 @@ const MAX_BYTES = 16 * 1024 * 1024 + 65_536;
 const REGISTER = "/api/software/desktop/devices/register";
 const DISCOVER = "/api/software/desktop/shell-release-availability";
 
+/** 新登记协议固定 8 字段；壳更新不带运行版本，既保留服务端已知值，也让重试动作摘要跨壳版本稳定。 */
+function registrationBody(identity: { deviceId: string; publicKeyBase64: string }, platform: ReturnType<typeof readDesktopDevicePlatform>) {
+  return { ...identity, ...platform, shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" };
+}
+
 /** 同一原 attempt 驱动登记、发现、完整安装器与本次切换资格；不安装、不激活或另起周期。 */
 export function createShellUpdateNetwork(input: NetworkInput) {
   let running = false;
@@ -52,9 +57,9 @@ export function createShellUpdateNetwork(input: NetworkInput) {
         const transport = createDesktopUpdateTransport({ dataDir: initial.dataDir, identity: { ...identity, createdAt: actual.createdAt },
           configuredServerOrigin: input.configuredServerOrigin });
         const origin = input.configuredServerOrigin;
-        const registrationBody = { ...identity, ...platform };
+        const registrationPayload = registrationBody(identity, platform);
         const context = { origin, deviceId: identity.deviceId, publicKeySha256, requestId };
-        const registrationIdentity = requestIdentity(context, "shell-register", "POST", REGISTER, registrationBody);
+        const registrationIdentity = requestIdentity(context, "shell-register", "POST", REGISTER, registrationPayload);
         const discoveryIdentity = requestIdentity(context, "shell-discover", "GET", DISCOVER);
         const slot = initial.network;
         const later = slot !== null && isLaterAction(slot.actionKey);
@@ -80,7 +85,7 @@ export function createShellUpdateNetwork(input: NetworkInput) {
         if (slot === null || slot.actionKey === registrationIdentity.actionKey) {
           actionKey = registrationIdentity.actionKey;
           await retry.run(async () => registration(await readResponse(await transport.requestRaw({ method: "POST", path: REGISTER,
-            body: registrationBody, requestId, signal: input.signal }), input.signal, requestId!)), registrationAction);
+            body: registrationPayload, requestId, signal: input.signal }), input.signal, requestId!)), registrationAction);
         } else {
           actionKey = registrationIdentity.actionKey;
           if ((await registrationAction.recoverResult(null)).status !== "verified") throw failure("DESKTOP_SHELL_NETWORK_RESULT_UNKNOWN");
@@ -255,7 +260,8 @@ async function selectedContext(input: NetworkInput, allowHandoff: boolean, insta
   const expected = slot.actionKey === "shell-discover" ? requestIdentity(base, "shell-discover", "GET", DISCOVER) : selectedIdentity(base, attempt, slot.actionKey);
   if (expected.requestSha256 !== slot.requestSha256) throw failure("DESKTOP_SHELL_NETWORK_STATE_CONFLICT");
   const directories = await resultDirectories(attempt.dataDir, requestId, false);
-  const registration = resultAction({ ...base, ...requestIdentity(base, "shell-register", "POST", REGISTER, { ...identity, ...platform }) },
+  const registration = resultAction({ ...base, ...requestIdentity(base, "shell-register", "POST", REGISTER,
+    registrationBody(identity, platform)) },
     "registration.json", "device-registration", value => registrationValue(value, identity.deviceId, publicKeySha256), directories);
   if ((await registration.recoverResult(null)).status !== "verified") throw failure("DESKTOP_SHELL_NETWORK_RESULT_UNKNOWN");
   const discovery = resultAction({ ...base, ...requestIdentity(base, "shell-discover", "GET", DISCOVER) }, "discovery.json", "shell-manifest",

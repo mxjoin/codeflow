@@ -115,6 +115,7 @@ import type { ThreadSessionManager } from "../engines/threadSessionManager.js";
 import type { HostToolExecutionResult, TurnTimeoutPolicy } from "../engines/threadSession.js";
 import { KnowledgeAssetStore } from "../knowledge/knowledgeAssetStore.js";
 import { buildKnowledgeAssetReadTools, renderKnowledgeSpecificationRules } from "../knowledge/knowledgeAssetTools.js";
+import { buildKnowledgeAcceptanceTool, createKnowledgeSpecificationTurn } from "../knowledge/knowledgeSpecificationTurn.js";
 import { buildKnowledgeChangeTool, createKnowledgeSuggestionTurn, KNOWLEDGE_CHANGE_RULE } from "../knowledge/knowledgeChangeTools.js";
 import { KnowledgeAssetError } from "../knowledge/knowledgeAssetFiles.js";
 import { assertClientReasoningEffortSupported } from "../engines/engineModelCapabilities.js";
@@ -2919,7 +2920,7 @@ export class OrchestrationEngine {
         node,
       );
       if (toolRegistry && knowledgeContext.catalogs.some(catalog => catalog.bundleId === "project-file-knowledge")) {
-        toolRegistry.tools.push(...buildKnowledgeAssetReadTools(true).tools, buildKnowledgeChangeTool());
+        toolRegistry.tools.push(...buildKnowledgeAssetReadTools(true).tools, buildKnowledgeChangeTool(), buildKnowledgeAcceptanceTool());
       }
       const runtimePolicy = this.buildRuntimePolicy(instance, node, role, executionPrefs, toolRegistry);
       const executionProfiles = this.resolveNodeExecutionProfiles(instance, node);
@@ -3141,11 +3142,12 @@ export class OrchestrationEngine {
         let workItemContextCheckpointRequired = false;
         const now = Date.now();
         const turnBillingContext = (await this.withDatabase(() => this.resolveNodeBillingContext(engine, executionPrefs.model)));
+        const providedSpecifications = projectStore?.snapshot(false, false).initialized ? projectStore.rules() : null;
         const turnPromptEnvelope = {
           ...prompt.promptEnvelope,
           knowledge: {
             ...prompt.promptEnvelope.knowledge,
-            projectSpecifications: projectStore?.snapshot(false, false).initialized ? renderKnowledgeSpecificationRules(projectStore) : null,
+            projectSpecifications: projectStore && providedSpecifications ? renderKnowledgeSpecificationRules(projectStore, providedSpecifications) : null,
           },
           meta: {
             ...prompt.promptEnvelope.meta,
@@ -3201,9 +3203,14 @@ export class OrchestrationEngine {
 
         let submittedResult: NodeFinalAnswerPayload | null = null;
         let forwardedTerminalKind: "completed" | "error" | null = null;
+        const specificationTurn = projectStore && providedSpecifications ? createKnowledgeSpecificationTurn({
+          store: projectStore, specifications: providedSpecifications, workspaceId: instance.workspaceId, threadId, turnId, engine,
+          userRequirements: currentUserMessage, isActive: isCurrentOutputOwner, emit: event => this.ctx.emitConversation(event),
+        }) : null;
         const knowledgeSuggestions = toolRegistry?.tools.some(tool => String(tool.toolsetId) === "__knowledge_assets__") ? createKnowledgeSuggestionTurn({
           store: new KnowledgeAssetStore(workspacePath), workspaceId: instance.workspaceId, threadId, turnId, engine,
           origin: "workflow", canPropose: true,
+          specificationTurn,
           isActive: isCurrentOutputOwner,
           emit: event => this.ctx.emitConversation(event),
         }) : null;
@@ -3460,6 +3467,7 @@ export class OrchestrationEngine {
             {
               conversation: (event) => {
                 if (!isCurrentOutputOwner()) return;
+                specificationTurn?.observe(event);
                 const terminalKind = resolveTurnTerminalKind(event, turnId);
                 if (terminalKind) {
                   if (submittedResult && terminalKind === "error") {

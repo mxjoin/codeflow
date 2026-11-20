@@ -9,6 +9,7 @@ import { engineDiagnosticCause, engineDiagnosticField, isEngineWorkspaceLogFailu
 import { trackOrdinaryTurnExecution, type OrdinaryTurnExecutionControl } from "../ordinaryTurnExecution.js";
 import { buildDefaultChatSystemPrompt } from "../defaultChatSystemPrompt.js";
 import { resolveWorkspaceKnowledgeChatContext } from "../workspaceKnowledgeChatContext.js";
+import { createKnowledgeSpecificationTurn } from "../../knowledge/knowledgeSpecificationTurn.js";
 import { buildPromptText } from "../utils/promptWithAttachments.js";
 import { assertClientReasoningEffortSupported } from "../../engines/engineModelCapabilities.js";
 import { createKnowledgeSuggestionTurn } from "../../knowledge/knowledgeChangeTools.js";
@@ -372,13 +373,20 @@ async function startThreadFollowUpTurn(ctx: ApiHandlerContext, input: {
     turnId, engine: thread.engine, model: persistedThread?.model ?? null, effort: persistedThread?.effort ?? null,
     prompt: input.text, isActive, sharedContext: input.sharedContext, trustedActor: input.trustedActor,
   }));
-  const workspaceKnowledge = knowledgeTurn ? { systemRule: null, requiredWorkspaceSkills: [], knowledgeAssetTools: null } : resolveWorkspaceKnowledgeChatContext({
+   const workspaceKnowledge = knowledgeTurn ? { systemRule: null, requiredWorkspaceSkills: [], knowledgeAssetTools: null, specifications: undefined } : resolveWorkspaceKnowledgeChatContext({
     workspacePath, engine: thread.engine, enabled: persistedThread?.knowledgeEnabled === true,
   });
   const knowledgeToolRegistry = knowledgeTurn?.registry ?? workspaceKnowledge.knowledgeAssetTools ?? null;
-  const suggestions = createKnowledgeSuggestionTurn({
+   const specificationTurn = workspaceKnowledge.specifications ? createKnowledgeSpecificationTurn({
+     store: new KnowledgeAssetStore(workspacePath), specifications: workspaceKnowledge.specifications,
+     workspaceId: input.workspaceId, threadId: input.threadId, turnId, engine: thread.engine,
+     userRequirements: await withInteractionDatabase(ctx, turnId, () => [input.text, ...ctx.db.conversationEvents.listByThreadType(input.threadId, "item.userMessage.created", { limit: 100 }).map(event => (event.payload as { text?: string }).text ?? "")].join("\n\n")),
+     isActive, emit: event => emitConversation(ctx, event),
+   }) : null;
+   const suggestions = createKnowledgeSuggestionTurn({
     store: new KnowledgeAssetStore(workspacePath), workspaceId: input.workspaceId, threadId: input.threadId,
     turnId, engine: thread.engine, origin: "chat", canPropose: Boolean(input.trustedActor), isActive,
+     specificationTurn,
     emit: event => emitConversation(ctx, event),
   });
   const knowledgeToolTransport = knowledgeToolRegistry
@@ -444,6 +452,7 @@ async function startThreadFollowUpTurn(ctx: ApiHandlerContext, input: {
         flush: () => ctx.flushLocalEvents?.(input.workspaceId, input.threadId) ?? Promise.resolve(),
         conversation: (event) => {
           if (!isThreadLifecycleCurrent()) return;
+           specificationTurn?.observe(event);
           settleKnowledgeConversationEvent(knowledgeTurn, turnId, event);
           emitConversation(ctx, event);
         },
@@ -460,7 +469,9 @@ async function startThreadFollowUpTurn(ctx: ApiHandlerContext, input: {
       try {
         execution.assertNotCancelled();
         execution.markProviderDispatch();
-        return await session.sendMessage(sendInput, sendEmitters);
+         const result = await session.sendMessage(sendInput, sendEmitters);
+         specificationTurn?.provided();
+         return result;
       } catch (error) {
         if (isWorkspaceApiRequestFailure(error) || isEngineWorkspaceLogFailure(error)) throw error;
         if (!knowledgeTurn && workspaceKnowledge.knowledgeAssetTools && thread.engine === "codex" && isCodexDynamicToolBindingMismatch(error)) {

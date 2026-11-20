@@ -1465,7 +1465,7 @@ watch(
   outline-offset: 2px;
 }
 .role-form__tabs { display:flex; flex-wrap:wrap; border-bottom:1px solid var(--app-border,#e8e8e8); margin-bottom:16px; }
-.role-form__tab { padding:8px 14px; border:none; background:none; font-size:13px; color:var(--app-muted,#999); border-bottom:2px solid transparent; }
+.role-form__tab { padding:8px 14px; border:none; background:none; font-size:13px; color:var(--app-muted,#999); border-bottom:2px solid transparent; cursor:pointer; }
 .role-form__tab--active { color:var(--app-primary,#1677ff); border-bottom-color:var(--app-primary,#1677ff); }
 .role-form__section { display:flex; flex:1 1 auto; min-height:0; flex-direction:column; gap:14px; overflow:auto; padding-right:4px; }
 /* 基本信息 tab 也走默认 overflow:auto，避免视口偏矮时「系统提示词」长 textarea 被外层 overflow:hidden 截掉无法滚动 */

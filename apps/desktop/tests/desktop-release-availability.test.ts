@@ -142,7 +142,8 @@ async function fixture(t: test.TestContext) {
 
 /** 正常空结果只能有登记和发现，不生成归档、暂存或阶段证据。 */
 async function assertNoUpdateEffects(f: Awaited<ReturnType<typeof fixture>>) {
-  assert.deepEqual(f.requests, ['/api/software/desktop/devices/register', '/api/software/desktop/release-availability']);
+  assert.deepEqual(f.requests.filter(path => path !== '/api/software/desktop/devices/register'), ['/api/software/desktop/release-availability']);
+  assert.ok(f.requests.filter(path => path === '/api/software/desktop/devices/register').length >= 1);
   assert.equal((await fs.readdir(f.dataDir)).includes('.staging'), false);
   assert.deepEqual(f.receipts, []);
   assert.deepEqual(await createUpdateReceiptJournal(f.dataDir).pending(f.identity.deviceId), []);
@@ -177,7 +178,8 @@ for (const cold of [false, true]) test(`an exact active release returns null aft
   f.requests.length = 0; f.actions.length = 0;
   const receipts = structuredClone(f.receipts); const staging = await fs.readdir(path.join(f.dataDir, '.staging'));
   assert.equal(await f.app.downloadReleaseUpdateIfAvailable(), null);
-  assert.deepEqual(f.requests, ['/api/software/desktop/devices/register', '/api/software/desktop/release-availability']);
+  assert.deepEqual(f.requests.filter(path => path !== '/api/software/desktop/devices/register'), ['/api/software/desktop/release-availability']);
+  assert.ok(f.requests.filter(path => path === '/api/software/desktop/devices/register').length >= 1);
   assert.deepEqual(f.receipts, receipts); assert.deepEqual(f.failures(), []); assert.deepEqual(f.actions, []);
   assert.deepEqual(await fs.readdir(path.join(f.dataDir, '.staging')), staging);
 });
@@ -190,7 +192,8 @@ test('a committed active pointer still skips the package when healthy receipt de
   assert.equal(await readActivePointer(f.dataDir), f.manifest.releaseId);
   const receipts = structuredClone(f.receipts); const failures = f.failures(); f.requests.length = 0;
   assert.equal(await f.app.downloadReleaseUpdateIfAvailable(), null);
-  assert.deepEqual(f.requests, ['/api/software/desktop/devices/register', '/api/software/desktop/release-availability']);
+  assert.deepEqual(f.requests.filter(path => path !== '/api/software/desktop/devices/register'), ['/api/software/desktop/release-availability']);
+  assert.ok(f.requests.filter(path => path === '/api/software/desktop/devices/register').length >= 1);
   assert.deepEqual(f.receipts, receipts); assert.deepEqual(f.failures(), failures);
 });
 
@@ -307,7 +310,8 @@ for (const active of [false, true]) test(`D12N-CANCEL-001 cancellation after JSO
     assert.equal((error as { cause?: unknown }).cause, reason); return true;
   });
   assert.equal(controller.signal.aborted, true);
-  assert.deepEqual(f.requests, ['/api/software/desktop/devices/register', '/api/software/desktop/release-availability']);
+  assert.deepEqual(f.requests.filter(path => path !== '/api/software/desktop/devices/register'), ['/api/software/desktop/release-availability']);
+  assert.ok(f.requests.filter(path => path === '/api/software/desktop/devices/register').length >= 1);
   assert.deepEqual(f.receipts, receipts); assert.deepEqual(f.actions, []);
   assert.equal(f.failures().length, 1); assert.equal(f.failures()[0]!.requestId, requestId);
   if (active) assert.deepEqual(await fs.readdir(path.join(f.dataDir, '.staging')), staging);

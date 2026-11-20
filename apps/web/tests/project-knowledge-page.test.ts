@@ -67,7 +67,10 @@ test("批量生成提供并发配置，页面保留状态并按需刷新", () =>
   assert.match(pageSource, /async function stopGeneration/u);
 });
 
-test("生成入口位于左侧资产树并复用树的选择状态", () => {
+test("常用操作收敛到顶部，左树仍复用多选生成状态", () => {
+  assert.match(pageSource, /@click="openSpecificationConversation">规格对话/u);
+  assert.match(pageSource, /@click="openUpdates\(null\)">待确认更新/u);
+  assert.match(pageSource, />完善规格<\/a-button>/u);
   assert.match(pageSource, /data-testid="tree-batch-actions"/u);
   assert.match(pageSource, /生成选中 \$\{checkedIds\.length\} 项/u);
   assert.match(pageSource, /startBuild\(checkedIds.length \? checkedIds/u);

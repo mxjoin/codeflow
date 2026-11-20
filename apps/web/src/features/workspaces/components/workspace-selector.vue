@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Modal, message, type TourProps } from "ant-design-vue";
-import { DownOutlined, FolderOutlined, PlusOutlined } from "@ant-design/icons-vue";
+import { DownOutlined, FolderOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons-vue";
 import type { WorkspaceId, WorkspaceSummary } from "@codeflowai/shared";
 
 import { useApiContext } from "../../../composables/useApiContext";
@@ -32,6 +32,8 @@ const { ctx } = useApiContext();
 
 const createOpen = ref(false);
 const saving = ref(false);
+const refreshing = ref(false);
+const refreshError = ref<string | null>(null);
 const compactOpen = ref(false);
 const compactQuery = ref("");
 const modalMode = ref<"create" | "edit">("create");
@@ -259,14 +261,21 @@ const filteredOptions = computed(() => {
 });
 const showActions = computed(() => !props.compact);
 
-/** 刷新本机列表；云端提醒仅在实际连接后请求。 */
-const refresh = async () => {
-  if (!config.canManageWorkspaces) return;
+/** 复用统一目录刷新在线状态；保留缓存，重复点击不并发，失败明确留在当前入口。 */
+const refresh = async (): Promise<boolean> => {
+  if (!config.canManageWorkspaces || refreshing.value) return false;
+  refreshing.value = true;
+  refreshError.value = null;
   try {
-    await workspaces.refresh(ctx.value);
+    await workspaces.refresh(ctx.value, { silent: true });
     if (config.connected || config.localRuntimeReady) await reminders.refreshWorkspaceSummaries(ctx.value);
+    return true;
   } catch (e) {
-    message.error(e instanceof Error ? e.message : String(e));
+    refreshError.value = e instanceof Error ? e.message : String(e);
+    if (!props.compact) message.error(refreshError.value);
+    return false;
+  } finally {
+    refreshing.value = false;
   }
 };
 
@@ -373,9 +382,11 @@ const resolveDefaultCreateClientId = (): string | null => {
   return createClients.value.length === 1 ? createClients.value[0]!.clientId : null;
 };
 
-const handleCompactOpenChange = (nextOpen: boolean) => {
+/** 每次展开重新读取 Host 状态，关闭时只清空搜索。 */
+const handleCompactOpenChange = (nextOpen: boolean): void => {
   compactOpen.value = nextOpen;
-  if (!nextOpen) compactQuery.value = "";
+  if (nextOpen) void refresh();
+  else compactQuery.value = "";
 };
 
 /** 紧凑入口选择工作区后关闭弹层；应用内切换负责后续上下文重建。 */
@@ -404,7 +415,12 @@ const handleCompactSelect = (workspaceId: string) => {
       <div class="ws-compact-panel">
         <div class="ws-compact-panel__header">
           <div class="ws-compact-panel__title">切换工作区</div>
+          <a-button type="text" size="small" :loading="refreshing" :disabled="!canOperate" aria-label="刷新工作区列表" @click.stop="refresh">
+            <template #icon><ReloadOutlined /></template>
+            刷新
+          </a-button>
         </div>
+        <a-alert v-if="refreshError" type="error" :message="refreshError" show-icon />
         <a-input
           v-model:value="compactQuery"
           allow-clear
@@ -542,7 +558,7 @@ const handleCompactSelect = (workspaceId: string) => {
       <a-tooltip v-if="selectedPath" :title="selectedPath">
         <a-tag color="blue">path</a-tag>
       </a-tooltip>
-      <a-button size="small" :disabled="!config.canManageWorkspaces" @click="refresh">刷新</a-button>
+      <a-button size="small" :loading="refreshing" :disabled="!config.canManageWorkspaces" @click="refresh">刷新</a-button>
       <a-button size="small" type="primary" :disabled="!canOperate" @click="openCreate">新增</a-button>
       <a-dropdown :trigger="['click']">
         <a-button size="small" :disabled="!config.canManageWorkspaces || !selectedWorkspace" @click.stop>管理</a-button>
@@ -730,8 +746,10 @@ const handleCompactSelect = (workspaceId: string) => {
 }
 
 .ws-compact-panel__header {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .ws-compact-panel__title {

@@ -112,6 +112,7 @@ import { buildDefaultChatSystemPrompt } from "./defaultChatSystemPrompt.js";
 import { resolveWorkspaceKnowledgeChatContext } from "./workspaceKnowledgeChatContext.js";
 import { handleKnowledgeAssetRequest } from "./handlers/knowledgeAssetHandlers.js";
 import { createKnowledgeSuggestionTurn } from "../knowledge/knowledgeChangeTools.js";
+import { createKnowledgeSpecificationTurn } from "../knowledge/knowledgeSpecificationTurn.js";
 import { KnowledgeAssetStore } from "../knowledge/knowledgeAssetStore.js";
 import { createKnowledgeConversationTurn, readKnowledgeConversationActor, settleKnowledgeConversationEvent, type KnowledgeConversationActor } from "../knowledge/knowledgeConversationService.js";
 import { KnowledgeAssetError, knowledgeFailure } from "../knowledge/knowledgeAssetFiles.js";
@@ -2275,6 +2276,7 @@ async function onThreadsSendMessage(ctx: ApiHandlerContext, req: ApiRequestMessa
       reasoningItemId,
       promptText,
       displayText,
+      specificationPaths: pathReferences.map(reference => reference.path),
       inputKind: inputContract.inputKind,
       preparedInputActions,
       roleId: effectiveRoleId,
@@ -2905,6 +2907,7 @@ async function continueThreadTurnWithManagedServices(
     reasoningItemId: string;
     promptText: string;
     displayText: string;
+    specificationPaths?: string[];
     inputKind?: ThreadInputKind;
     preparedInputActions: PreparedCodexSkillInput | null;
     roleId: RoleId | null;
@@ -2980,11 +2983,12 @@ async function continueThreadTurnWithManagedServices(
       input.executionProfileContext?.userId ?? "",
     ));
     const workspaceKnowledge = knowledgeTurn
-      ? { systemRule: null, requiredWorkspaceSkills: [], knowledgeAssetTools: null }
+      ? { systemRule: null, requiredWorkspaceSkills: [], knowledgeAssetTools: null, specifications: undefined }
       : resolveWorkspaceKnowledgeChatContext({
         workspacePath: input.workspacePath,
         engine: input.engine,
         enabled: thread?.knowledgeEnabled === true,
+        paths: input.specificationPaths,
       });
     const toolRegistry = mergeExecutableToolRegistries(
       roleRuntime?.toolRegistry,
@@ -2993,6 +2997,13 @@ async function continueThreadTurnWithManagedServices(
       chatWorkflowEnabled ? buildChatWorkflowToolRegistry() : null,
     );
     const platformToolTransportRequirement = roleRuntime?.requiresRoleToolTransport || knowledgeTurn || workspaceKnowledge.knowledgeAssetTools ? "required" : "optional";
+    const specificationTurn = workspaceKnowledge.specifications ? createKnowledgeSpecificationTurn({
+      store: new KnowledgeAssetStore(input.workspacePath), specifications: workspaceKnowledge.specifications,
+      workspaceId: input.workspaceId, threadId: input.threadId, turnId: input.turnId, engine: input.engine,
+      userRequirements: await withApiDatabase(ctx, input.requestId, () => [input.promptText, ...ctx.db.conversationEvents.listByThreadType(input.threadId, "item.userMessage.created", { limit: 100 }).map(event => (event.payload as { text?: string }).text ?? "")].join("\n\n")),
+      isActive: () => input.isThreadLifecycleCurrent() && isRuntimeTurnCurrent(ctx, input),
+      emit: event => emitConversation(ctx, event),
+    }) : null;
     const suggestions = createKnowledgeSuggestionTurn({
       store: new KnowledgeAssetStore(input.workspacePath),
       workspaceId: input.workspaceId,
@@ -3001,6 +3012,7 @@ async function continueThreadTurnWithManagedServices(
       engine: input.engine,
       origin: "chat",
       canPropose: Boolean(input.knowledgeConversationActor),
+      specificationTurn,
       isActive: () => input.isThreadLifecycleCurrent() && isRuntimeTurnCurrent(ctx, input),
       emit: event => emitConversation(ctx, event),
     });
@@ -3109,6 +3121,7 @@ async function continueThreadTurnWithManagedServices(
               if (!input.isThreadLifecycleCurrent()) return;
               emitConversation(ctx, event, () => {
                 if (!isRuntimeTurnCurrent(ctx, input)) return false;
+                specificationTurn?.observe(event);
                 if (event.type === "turn.completed" || event.type === "turn.error") knowledgeTerminalEvent = event;
                 return true;
               });
@@ -3147,6 +3160,7 @@ async function continueThreadTurnWithManagedServices(
       }
     };
     const result = await sendTurn();
+    specificationTurn?.provided();
     await ctx.flushLocalEvents?.(input.workspaceId, input.threadId);
     if (!input.isThreadLifecycleCurrent() || !await withApiDatabase(ctx, input.requestId, () => isTurnStillStarted(ctx, input.turnId))) {
       throw Object.assign(new Error("普通回合已中断"), { code: MANUAL_TURN_INTERRUPT_CODE, terminationKind: "manual_interrupt",

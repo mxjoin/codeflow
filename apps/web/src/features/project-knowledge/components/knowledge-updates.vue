@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { KnowledgeAssetNode, KnowledgeChangeSummary, KnowledgeGenerationPreview, KnowledgeGenerationRunView, KnowledgeGenerationSelection, KnowledgeReviewIssue, KnowledgeReviewReportView } from "@codeflowai/shared";
+import type { KnowledgeAssetNode, KnowledgeChangeDetail, KnowledgeChangeSummary, KnowledgeGenerationPreview, KnowledgeGenerationRunView, KnowledgeGenerationSelection, KnowledgeReviewIssue, KnowledgeReviewReportView } from "@codeflowai/shared";
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { Modal } from "ant-design-vue";
 import { requestKnowledgeAsset } from "../../../api/projectKnowledge";
@@ -11,7 +11,7 @@ import KnowledgeBuildPreview from "./knowledge-build-preview.vue";
 import KnowledgeChangeInbox from "./knowledge-change-inbox.vue";
 
 const props = defineProps<{ workspaceId: string; context: ApiRequestContext; nodes: KnowledgeAssetNode[]; formalNodes: KnowledgeAssetNode[]; runs: KnowledgeGenerationRunView[]; updates: KnowledgeLibraryUpdate[]; scopeNodeId: string | null; canWrite: boolean; actionsBusy?: boolean; changeId?: string | null; focusId?: string | null; focusReport?: boolean; recoveryRunId?: string; afterApply: (context: KnowledgeDocumentContext, count: number) => Promise<boolean> }>();
-const emit = defineEmits<{ changed: [run?: KnowledgeGenerationRunView]; focus: [id: string]; preview: [context: KnowledgeDocumentContext | null]; close: []; openFile: [path: string]; review: [nodeId: string]; resumeReview: [context: KnowledgeDocumentContext]; repair: [report: KnowledgeReviewReportView]; repairIssue: [report: KnowledgeReviewReportView, issue: KnowledgeReviewIssue]; returnToGeneration: [report: KnowledgeReviewReportView, runId: string]; busy: [value: boolean]; error: [cause: unknown, context: Record<string, unknown>] }>();
+const emit = defineEmits<{ changed: [run?: KnowledgeGenerationRunView]; focus: [id: string]; preview: [context: KnowledgeDocumentContext | null]; close: []; openFile: [path: string]; recheck: [change: KnowledgeChangeDetail]; review: [nodeId: string]; resumeReview: [context: KnowledgeDocumentContext]; repair: [report: KnowledgeReviewReportView]; repairIssue: [report: KnowledgeReviewReportView, issue: KnowledgeReviewIssue]; returnToGeneration: [report: KnowledgeReviewReportView, runId: string]; busy: [value: boolean]; error: [cause: unknown, context: Record<string, unknown>] }>();
 type Row = { id: string; nodeId: string; title: string; body: boolean; structure: boolean; generating: boolean; runId: string | null; revisionId: string | null; changeId: string | null; source: string; createdAt: string; reason: string | null; canApply: boolean };
 const previews = shallowRef(new Map<string, KnowledgeGenerationPreview>());
 const changes = shallowRef<KnowledgeChangeSummary[]>([]);
@@ -348,7 +348,7 @@ onBeforeUnmount(() => { epoch++; controller.abort(); });
       </aside>
       <div class="update-content">
         <KnowledgeBuildPreview v-if="activeRun && (!activeRun.active || activeReviewActivity || active?.revisionId && !active.generating)" :key="active?.id ?? activeRun.id" ref="buildRef" embedded :recovery-only="!active" :workspace-id="workspaceId" :context="context" :run="activeRun" :runs="runs" :nodes="nodes" :supplied-preview="previews.get(activeRun.id)" :can-write="canWrite" :actions-busy="locked || actionsBusy" :can-start-task="formalNodes.some(node => node.id === active?.nodeId)" :scope-node-id="active?.nodeId" :focus="activeFocus" @busy="childLock" @changed="receiveRun" @open-file="emit('openFile', $event)" @review="emit('review', $event)" @resume-review="emit('resumeReview', $event)" @repair="emit('repair', $event)" @repair-issue="(report, issue) => emit('repairIssue', report, issue)" @return-to-generation="(report, runId) => emit('returnToGeneration', report, runId)" @error="(cause, context) => fail(cause, context)" />
-        <KnowledgeChangeInbox v-else-if="active?.changeId" :key="active.changeId" ref="changeRef" embedded :workspace-id="workspaceId" :context="context" :can-write="canWrite" :change-id="active.changeId" @selected="validateChange" @changed="emit('changed')" />
+        <KnowledgeChangeInbox v-else-if="active?.changeId" :key="active.changeId" ref="changeRef" embedded :workspace-id="workspaceId" :context="context" :can-write="canWrite" :change-id="active.changeId" @recheck="emit('recheck', $event)" @selected="validateChange" @changed="emit('changed')" />
         <div v-else-if="active && activeRun?.active" class="updates-processing" role="status" aria-live="polite" aria-busy="true"><a-spin size="large" aria-hidden="true" /><span>{{ active.reason }}</span></div>
         <p v-else class="updates-empty">{{ active?.reason || '选择具体更新查看内容与对比。多个版本不会自动取最新。' }}</p>
       </div>

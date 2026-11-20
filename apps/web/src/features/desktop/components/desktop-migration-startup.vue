@@ -18,9 +18,12 @@ const busy = ref(false);
 const localReady = ref(false);
 const accountNoticeDismissed = ref(false);
 const canDeferDiscovery = computed(() => state.value?.status === "failed" && state.value.canDefer === true && Boolean(bridge?.deferMigration));
+const deferredMigrationNotice = computed(() => localReady.value && state.value?.status === "ready"
+  && state.value.errorCode === "SOURCE_ACCOUNT_UNRESOLVED" ? state.value.message : null);
 /** 已有有效登录时不再提醒恢复；保存失败仍明确展示，关闭只影响本次界面。 */
 const showAccountNotice = computed(() => localReady.value && !accountNoticeDismissed.value
-  && (Boolean(actionError.value) || state.value?.account.status === "failed" && !(config.isAccountSession && config.hasActiveSession)));
+  && (Boolean(actionError.value) || Boolean(deferredMigrationNotice.value)
+    || state.value?.account.status === "failed" && !(config.isAccountSession && config.hasActiveSession)));
 // 启动页先于主应用挂载，按钮直接复用 CSS 主题变量，避免依赖主应用的主题容器。
 const startupTheme = { components: { Button: {
   colorPrimary: "var(--app-accent)", colorPrimaryHover: "var(--app-accent)", colorPrimaryActive: "var(--app-accent)",
@@ -123,7 +126,8 @@ onBeforeUnmount(() => { unsubscribe?.(); });
 <template>
   <ConfigProvider :theme="startupTheme">
     <aside v-if="showAccountNotice" class="desktop-migration__account" aria-live="polite">
-      <Alert type="warning" show-icon closable close-text="关闭" :message="actionError || '本地数据已迁移，账号未登录。'" @close="dismissAccountNotice">
+      <Alert type="warning" show-icon closable close-text="关闭"
+        :message="actionError || deferredMigrationNotice || '本地数据已迁移，账号未登录。'" @close="dismissAccountNotice">
         <template #action><Button size="small" @click="openAccountLogin">去登录</Button></template>
       </Alert>
     </aside>

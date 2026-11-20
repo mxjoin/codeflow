@@ -125,8 +125,9 @@ for (const phase of ["discovery", "download"] as const) for (const badAck of ["l
     assert.equal((await f.app.getUpdateState()).operation, "idle");
     assert.equal(await readActivePointer(f.dataDir), null);
     assert.deepEqual(await createUpdateReceiptJournal(f.dataDir).pending(f.identity.deviceId), []);
-    assert.deepEqual(f.routes, ["/api/software/desktop/devices/register", "/api/software/desktop/release",
-      ...(phase === "download" ? ["/api/software/desktop/releases/interrupted-release/archive"] : [])]);
+    assert.deepEqual(f.routes.filter(route => route !== "/api/software/desktop/devices/register"),
+      ["/api/software/desktop/release", ...(phase === "download" ? ["/api/software/desktop/releases/interrupted-release/archive"] : [])]);
+    assert.ok(f.routes.some(route => route === "/api/software/desktop/devices/register"));
     const history = await f.app.getUpdateDiagnostics();
     assert.equal(history.deviceId, f.identity.deviceId);
     assert.equal(history.failures.length, 1);

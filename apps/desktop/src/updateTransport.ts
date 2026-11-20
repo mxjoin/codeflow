@@ -13,6 +13,8 @@ const REMOTE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
 export function createDesktopUpdateTransport(input: { dataDir: string; identity: DeviceIdentity; configuredServerOrigin: string; timeoutMs?: number;
   /** 账号 Server 可显式使用 HTTP；例外仅用于签名登记，不能下载更新或发送回执。 */
   allowHttpRegistration?: boolean;
+  /** 设备登记与心跳需要的版本事实；旧构造点缺省为 unknown。 */
+  getVersions?: () => { shellVersion: string; webVersion: string; clientVersion: string; releaseId: string };
   getNetworkContext?: () => { signal: AbortSignal; retry: UpdateNetworkRetry } | undefined }) {
   const identity = { deviceId: input.identity.deviceId, publicKeyBase64: input.identity.publicKeyBase64 };
   const publicKeySha256 = desktopDevicePublicKeySha256(identity.publicKeyBase64);
@@ -171,7 +173,10 @@ export function createDesktopUpdateTransport(input: { dataDir: string; identity:
     async register(options: { signal?: AbortSignal; requestId?: string } = {}): Promise<{ deviceId: string; publicKeySha256: string }> {
       options.signal?.throwIfAborted();
       const platform = readDesktopDevicePlatform(process.platform, process.arch);
-      const body = Buffer.from(JSON.stringify({ deviceId: identity.deviceId, publicKeyBase64: identity.publicKeyBase64, ...platform }), "utf8");
+      const versions = input.getVersions?.() ?? { shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" };
+      const body = Buffer.from(JSON.stringify({ deviceId: identity.deviceId, publicKeyBase64: identity.publicKeyBase64, ...platform,
+        shellVersion: versions.shellVersion, webVersion: versions.webVersion,
+        clientVersion: versions.clientVersion, releaseId: versions.releaseId }), "utf8");
       const requestId = options.requestId ?? crypto.randomUUID();
       return await runNetwork(options.signal, async signal => {
         const response = await send({ method: "POST", path: "/api/software/desktop/devices/register", signal, requestId }, body);

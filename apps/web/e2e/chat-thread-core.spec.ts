@@ -65,6 +65,59 @@ test.describe("会话核心链路", () => {
     expect(new URL(page.url()).searchParams.get("workspaceId")).toBe(monitorWorkspace);
   });
 
+  test("工作区下拉打开及手动刷新会更新共享 Host 状态，失败保留列表", async ({ page }) => {
+    await installSession(page);
+    let online = false, failRefresh = false, requests = 0;
+    const mainWorkspace = "workspace_chat_core_e2e";
+    await page.route("**/api/workspaces?**", route => {
+      requests++;
+      if (failRefresh) return route.fulfill({ status: 503, json: { ok: false, code: "WORKSPACE_REFRESH_FAILED", message: "工作区列表刷新失败" } });
+      return route.fulfill({ json: { ok: true, workspaceListAuthoritative: true, workspaces: [
+        { id: mainWorkspace, title: "main", path: "D:/e2e-main", kind: "local", createdAt: 1, updatedAt: 1 },
+        { id: "shared:refresh-test", title: "测试共享入口", path: "", kind: "shared", createdAt: 2, updatedAt: 2,
+          entryStatus: online ? "available" : "host_offline", disabledReason: online ? null : "Host 当前离线",
+          shared: { displayName: "测试共享入口", hostOwnerFullName: "测试 Host" } },
+      ] } });
+    });
+    await page.goto(`/chat?workspaceId=${mainWorkspace}`);
+    await page.getByRole("button", { name: "暂时继续使用 Web" }).click();
+    const selector = page.locator(".ws-compact-trigger");
+    await expect(selector).toHaveAttribute("aria-label", "切换工作区，当前 main");
+    await selector.click();
+    const panel = page.locator(".ws-compact-panel");
+    const shared = panel.locator(".ws-compact-option").filter({ hasText: "测试共享入口" });
+    await expect(shared).toBeDisabled();
+    await expect(shared).toContainText("Host 离线");
+    await selector.click();
+    await expect(panel).toBeHidden();
+
+    online = true;
+    const beforeOpen = requests;
+    await selector.click();
+    await expect(shared).toBeEnabled();
+    await expect(shared).toContainText("Host 在线");
+    expect(requests).toBeGreaterThan(beforeOpen);
+
+    online = false;
+    const refresh = panel.getByRole("button", { name: "刷新工作区列表" });
+    await refresh.click();
+    await expect(shared).toBeDisabled();
+    await expect(shared).toContainText("Host 离线");
+    await expect(panel).toBeVisible();
+
+    failRefresh = true;
+    await refresh.click();
+    await expect(page.getByText("工作区列表刷新失败", { exact: true }).first()).toBeVisible();
+    await expect(shared).toBeDisabled();
+    await expect(refresh).toBeEnabled();
+
+    failRefresh = false;
+    online = true;
+    await refresh.click();
+    await expect(shared).toBeEnabled();
+    await expect(shared).toContainText("Host 在线");
+  });
+
   test("CT-02 新建会话默认 Codex", async ({ page }) => {
     await installSession(page);
     await page.goto("/chat");

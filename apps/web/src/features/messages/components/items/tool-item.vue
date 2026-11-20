@@ -6,6 +6,7 @@ import type { ConversationTool, ConversationDiff } from "@codeflowai/shared";
 
 import { copyToClipboard } from "@/composables/useClipboard";
 import { useUiStore } from "../../../../store/ui";
+import KnowledgeExecutionRecord from "../../../project-knowledge/components/knowledge-execution-record.vue";
 
 defineOptions({ name: "ToolItem" });
 
@@ -17,6 +18,8 @@ type Props = {
 
 const props = defineProps<Props>();
 const ui = useUiStore();
+/** 规格记录的完成只表示保存成功，不能显示为业务验收绿勾。 */
+const isKnowledgeRecord = computed(() => ["项目规格已提供", "规格验证依据"].includes(props.item.toolType));
 
 type TodoListRow = {
   step: string;
@@ -124,7 +127,7 @@ function lineClass(line: string): string {
   <details class="msg msg--tool msg--collapsible">
     <summary class="msg__summary-row">
       <div class="msg__summary-left">
-        <span class="msg__role">{{ isTodoListToolItem ? '任务' : '工具' }}</span>
+        <span class="msg__role">{{ isKnowledgeRecord ? '规格' : isTodoListToolItem ? '任务' : '工具' }}</span>
         <span v-if="!isTodoListToolItem" class="msg__title" style="margin: 0">{{ item.title }}</span>
         <span v-if="summaryPreview" class="msg__summary-preview">{{ summaryPreview }}</span>
       </div>
@@ -133,7 +136,8 @@ function lineClass(line: string): string {
         <span v-if="item.changes?.length" class="msg__hint-inline">{{ item.changes.length }} 个文件</span>
         <span v-if="item.durationMs != null" class="msg__hint-inline">{{ item.durationMs }}ms</span>
         <span v-if="todoListSummary" class="msg__hint-inline">{{ todoListSummary }}</span>
-        <CheckCircleFilled v-if="!isTodoListToolItem && item.status === 'completed'" class="msg__status-icon msg__status-icon--done" />
+        <ClockCircleOutlined v-if="isKnowledgeRecord" class="msg__status-icon msg__status-icon--warning" />
+        <CheckCircleFilled v-else-if="!isTodoListToolItem && item.status === 'completed'" class="msg__status-icon msg__status-icon--done" />
         <SyncOutlined v-else-if="!isTodoListToolItem && item.status === 'started'" class="msg__status-icon msg__status-icon--running" :spin="true" />
         <ClockCircleOutlined v-else-if="!isTodoListToolItem && item.status === 'incomplete'" class="msg__status-icon msg__status-icon--warning" />
         <CloseCircleFilled v-else-if="!isTodoListToolItem && item.status === 'failed'" class="msg__status-icon msg__status-icon--failed" />
@@ -141,6 +145,7 @@ function lineClass(line: string): string {
     </summary>
 
     <div class="msg__body">
+      <KnowledgeExecutionRecord v-if="isKnowledgeRecord" :item="item" />
       <div v-if="todoListView" class="tool-todolist">
         <div v-if="todoListView.explanation" class="tool-todolist__explanation">{{ todoListView.explanation }}</div>
         <div class="tool-todolist__rows">
@@ -153,8 +158,8 @@ function lineClass(line: string): string {
         </div>
       </div>
 
-      <pre v-if="!isTodoListToolItem && !diffLines.length && item.detail" class="msg__pre">{{ item.detail }}</pre>
-      <pre v-if="!isTodoListToolItem && (!diffLines.length || item.status === 'failed') && item.output" class="msg__pre msg__pre--output">{{ item.output }}</pre>
+      <pre v-if="!isKnowledgeRecord && !isTodoListToolItem && !diffLines.length && item.detail" class="msg__pre">{{ item.detail }}</pre>
+      <pre v-if="!isKnowledgeRecord && !isTodoListToolItem && (!diffLines.length || item.status === 'failed') && item.output" class="msg__pre msg__pre--output">{{ item.output }}</pre>
 
       <!-- 内联 diff -->
       <div v-if="diffLines.length" class="diff-view">

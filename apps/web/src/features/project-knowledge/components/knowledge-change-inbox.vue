@@ -8,7 +8,7 @@ import MarkdownContent from "../../markdown/MarkdownContent.vue";
 import DiffViewer from "../../chat/components/diff-viewer.vue";
 
 const props = defineProps<{ workspaceId: string; canWrite: boolean; context: ApiRequestContext; embedded?: boolean; changeId?: string | null; nodeId?: string | null; nodeTitle?: string }>();
-const emit = defineEmits<{ changed: []; index: [nodes: KnowledgePendingChangeNode[]]; loading: [value: boolean]; selected: [change: { id: string; nodeId: string; hash: string; stale: boolean; reason: string }] }>();
+const emit = defineEmits<{ changed: []; index: [nodes: KnowledgePendingChangeNode[]]; loading: [value: boolean]; recheck: [change: KnowledgeChangeDetail]; selected: [change: { id: string; nodeId: string; hash: string; stale: boolean; reason: string }] }>();
 const items = ref<KnowledgeChangeSummary[]>([]);
 const detail = ref<KnowledgeChangeDetail | null>(null);
 const selectedId = ref<string | null>(null);
@@ -121,7 +121,7 @@ defineExpose({ confirm });
     <section class="change-detail">
       <div v-if="reading || loading && !detail" class="inbox-empty" role="status"><a-spin /><p>正在读取修改建议…</p></div>
       <template v-else-if="detail">
-        <div v-if="detail.stale && detail.status === 'pending'" class="stale-warning">依据已变化，无法直接批准：{{ detail.staleReasons.join('；') }}。请重新核对后提交建议。</div>
+        <div v-if="detail.stale && detail.status === 'pending'" class="stale-warning">依据已变化，无法直接批准：{{ detail.staleReasons.join('；') }}。<a-button size="small" :disabled="!canWrite || busy" @click="emit('recheck', detail)">对照最新正文重新整理</a-button></div>
         <div class="comparison-toolbar">
           <div class="detail-heading" :title="`${detail.origin === 'workflow' ? '流程会话' : '普通会话'}提出 · ${detail.createdAt.replace('T', ' ').slice(0, 16)}`"><h2>{{ detail.title }}</h2><p :title="detail.summary">{{ detail.summary }}</p></div>
           <div class="comparison-actions">

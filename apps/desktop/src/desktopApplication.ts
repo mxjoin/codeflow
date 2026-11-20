@@ -147,6 +147,8 @@ export function createDesktopApplication(input: {
   let updatesSuppressed = false;
   let stoppingUpdates = false;
   let updateTimer: ReturnType<typeof setTimeout> | undefined;
+  let presenceTimer: ReturnType<typeof setInterval> | undefined;
+  let presenceTransport: ReturnType<typeof createDesktopUpdateTransport> | undefined;
   let telemetryTimer: ReturnType<typeof setTimeout> | undefined;
   let telemetryFlight: Promise<void> | undefined;
   let updateFlight: Promise<ActiveRelease | null> | undefined;
@@ -204,7 +206,7 @@ export function createDesktopApplication(input: {
       const registrationRequestId = crypto.randomUUID();
       try {
         await createDesktopUpdateTransport({ dataDir: input.dataDir, identity: identity!, configuredServerOrigin: url.origin,
-          allowHttpRegistration: true }).register({ signal: controller.signal, requestId: registrationRequestId });
+          allowHttpRegistration: true, getVersions: presenceVersions }).register({ signal: controller.signal, requestId: registrationRequestId });
       } catch (error) {
         // 原 IPC 边界只记录一次，保留设备及签名请求关联，不附加账号凭据或响应正文。
         if (error instanceof Error) Object.assign(error, { deviceId: identity!.deviceId, registrationRequestId });
@@ -224,6 +226,21 @@ export function createDesktopApplication(input: {
   let currentArchiveSha256: string | undefined;
   let currentVersion = "unknown";
   let currentClientVersion = "unknown";
+  /** 设备心跳版本事实；运行时就绪前使用 unknown，避免伪造版本。 */
+  const presenceVersions = () => ({
+    shellVersion: input.shellVersion ?? "unknown",
+    webVersion: currentVersion,
+    clientVersion: currentClientVersion,
+    releaseId: currentReleaseId,
+  });
+  /** 启动及每 6 小时上报设备版本与活跃时间；独立无重试连接，失败只记录，不阻断启动或更新。 */
+  const reportDevicePresence = (): void => {
+    if (!identity || !input.configuredServerOrigin) return;
+    presenceTransport ??= createDesktopUpdateTransport({ dataDir: input.dataDir, identity,
+      configuredServerOrigin: input.configuredServerOrigin, getVersions: presenceVersions });
+    void presenceTransport.register({ requestId: `device-presence:${crypto.randomUUID()}` })
+      .catch(error => input.host.onUpdateError?.(error, { requestId: "device-presence", deviceId: identity!.deviceId, logOnly: true }));
+  };
   let currentBundleVersion: DesktopBundleVersion | null = null;
   let bundleDetails: DesktopUpdateDetails["bundle"] = { requestId: null, target: null, phase: null, result: "unknown", failure: null };
   /** 提醒状态读写失败交给宿主记录，不阻断更新轮次。 */
@@ -1401,7 +1418,7 @@ export function createDesktopApplication(input: {
         failureJournal = createUpdateFailureJournal(input.dataDir);
         if (input.configuredServerOrigin) {
           transport = createDesktopUpdateTransport({ dataDir: input.dataDir, identity, configuredServerOrigin: input.configuredServerOrigin,
-            getNetworkContext: () => networkContext });
+            getVersions: presenceVersions, getNetworkContext: () => networkContext });
           receiptDelivery = createUpdateReceiptDelivery({ journal: receiptJournal, deviceId: identity.deviceId, transport });
         }
         const recoveredDatabase = await databaseBackup.recover(await readActivePointer(input.dataDir));
@@ -1501,6 +1518,11 @@ export function createDesktopApplication(input: {
           if (!startupActiveRelease && health) initialExpectation = baselineRelease?.manifest ?? {
             releaseId: "installation", clientVersion: health.clientVersion, protocolVersion: health.protocolVersion, dbSchemaVersion: health.dbSchemaVersion,
           };
+          reportDevicePresence();
+          if (transport && !presenceTimer) {
+            presenceTimer = setInterval(reportDevicePresence, 6 * 60 * 60 * 1000);
+            presenceTimer.unref?.();
+          }
         };
         await reportStartup("正在启动本地服务…");
         if (!migration) await startRuntime();
@@ -1683,6 +1705,9 @@ export function createDesktopApplication(input: {
       automaticUpdates = false;
       if (updateTimer) clearTimeout(updateTimer);
       updateTimer = undefined;
+      if (presenceTimer) clearInterval(presenceTimer);
+      presenceTimer = undefined;
+      presenceTransport = undefined;
       /** 启动取消与启动失败共享这一退出结果，清理失败不能被 STOPPED 掩盖。 */
       const closing = (async (): Promise<void> => {
         try {

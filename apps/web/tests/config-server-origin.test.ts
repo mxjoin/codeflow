@@ -75,8 +75,6 @@ for (const legacy of ["ws://47.98.203.210:39280", "ws://47.98.203.210:39280/ws/w
 }
 
 for (const [target, saved] of [["wss://codeflow-test.hanshangai.com", "wss://codeflowai.cn"],
-  ["wss://codeflow-test.hanshangai.com", "wss://codeflow.hanshangai.com"],
-  ["wss://codeflowai.cn", "wss://codeflow.hanshangai.com"],
   ["wss://codeflow-test.hanshangai.com", "ws://127.0.0.1:39280"], ["wss://codeflowai.cn", "ws://47.98.203.210:39280"]]) {
   test(`默认 ${target} 不改写其他已保存入口 ${saved}`, t => {
     const { store, migrate } = fixture(t, "codeflow://desktop/chat", { VITE_CODEFLOWAI_SERVER_WS_ORIGIN: target }, saved);

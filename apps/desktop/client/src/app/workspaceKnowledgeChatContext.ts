@@ -4,6 +4,7 @@ import type {
   EngineType,
   KnowledgeAssetRuntimeMode,
   ExecutableToolRegistry,
+  KnowledgeSpecificationRules,
 } from "@codeflowai/shared";
 
 import type { RequiredWorkspaceSkill } from "../engines/threadSession.js";
@@ -11,6 +12,7 @@ import { KnowledgeAssetStore } from "../knowledge/knowledgeAssetStore.js";
 import { KnowledgeAssetError } from "../knowledge/knowledgeAssetFiles.js";
 import { KNOWLEDGE_ASSET_READING_RULE, buildKnowledgeAssetReadTools, renderKnowledgeSpecificationRules } from "../knowledge/knowledgeAssetTools.js";
 import { buildKnowledgeChangeTool, KNOWLEDGE_CHANGE_RULE } from "../knowledge/knowledgeChangeTools.js";
+import { buildKnowledgeAcceptanceTool } from "../knowledge/knowledgeSpecificationTurn.js";
 
 export type WorkspaceKnowledgeChatStatus = "ready" | "initializing" | "not_initialized" | "unavailable";
 
@@ -36,6 +38,7 @@ export type WorkspaceKnowledgeChatPrompt = {
   systemRule: string | null;
   requiredWorkspaceSkills: RequiredWorkspaceSkill[];
   knowledgeAssetTools?: ExecutableToolRegistry | null;
+  specifications?: KnowledgeSpecificationRules;
 };
 
 export type WorkspaceKnowledgeChatContext = WorkspaceKnowledgeReadiness & WorkspaceKnowledgeChatPrompt;
@@ -45,11 +48,12 @@ export function resolveWorkspaceKnowledgeChatContext(input: {
   workspacePath: string;
   engine: EngineType;
   enabled?: boolean;
+  paths?: string[];
 }): WorkspaceKnowledgeChatContext {
   const readiness = resolveWorkspaceKnowledgeReadiness(input);
   return {
     ...readiness,
-    ...renderWorkspaceKnowledgeChatPrompt(readiness, input.enabled === true),
+    ...renderWorkspaceKnowledgeChatPrompt(readiness, input.enabled === true, input.paths),
   };
 }
 
@@ -99,17 +103,20 @@ export function resolveWorkspaceKnowledgeReadiness(input: {
 }
 
 /** 启用知识时读取失败必须中止；规格确定加载，其他知识按需导航。 */
-export function renderWorkspaceKnowledgeChatPrompt(readiness: WorkspaceKnowledgeReadiness, enabled = false): WorkspaceKnowledgeChatPrompt {
+export function renderWorkspaceKnowledgeChatPrompt(readiness: WorkspaceKnowledgeReadiness, enabled = false, paths: string[] = []): WorkspaceKnowledgeChatPrompt {
   if (enabled && readiness.status === "unavailable") {
     throw new KnowledgeAssetError(readiness.reasonCode ?? "KNOWLEDGE_READINESS_UNAVAILABLE", readiness.issues.map(issue => issue.message).join("；") || "项目知识库不可用", 503);
   }
   if (!enabled || readiness.status !== "ready") return { systemRule: null, requiredWorkspaceSkills: [] };
+  const store = new KnowledgeAssetStore(readiness.workspacePath);
+  const specifications = store.rules(paths);
   return {
+    specifications,
     systemRule: [`项目知识实际目录：${readiness.knowledgeEntryPath}。`,
-      renderKnowledgeSpecificationRules(new KnowledgeAssetStore(readiness.workspacePath)),
+      renderKnowledgeSpecificationRules(store, specifications),
       KNOWLEDGE_ASSET_READING_RULE, KNOWLEDGE_CHANGE_RULE].filter(Boolean).join("\n"),
     requiredWorkspaceSkills: [],
-    knowledgeAssetTools: { tools: [...buildKnowledgeAssetReadTools(true).tools, buildKnowledgeChangeTool()] },
+    knowledgeAssetTools: { tools: [...buildKnowledgeAssetReadTools(true).tools, buildKnowledgeChangeTool(), buildKnowledgeAcceptanceTool()] },
   };
 }
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { KNOWLEDGE_CATEGORIES, KNOWLEDGE_MAX_REVIEW_ROUNDS, resolveEngineModelProvider, resolveThreadPrefsWithCatalogDefaults, type KnowledgeCategory } from "@codeflowai/shared";
 import type {
-  ApiResult, EngineType, KnowledgeAssetDetail, KnowledgeAssetNode, KnowledgeAssetsSnapshot, KnowledgeAssetSearchHit,
+  ApiResult, EngineType, KnowledgeAssetDetail, KnowledgeAssetNode, KnowledgeAssetsSnapshot, KnowledgeAssetSearchHit, KnowledgeChangeDetail,
   KnowledgeGenerationRunView, KnowledgeConversationSummary, KnowledgeAssetDocument, KnowledgeReviewIssue, KnowledgeReviewReportView, KnowledgePendingChangeNode, ThreadId, ThreadSummary, WorkspaceId,
 } from "@codeflowai/shared";
 import { message, Modal } from "ant-design-vue";
@@ -30,6 +30,8 @@ import KnowledgeReviewReport from "./knowledge-review-report.vue";
 import KnowledgeUpdateSettings from "./knowledge-update-settings.vue";
 import KnowledgeManagementPolicy from "./knowledge-management-policy.vue";
 import KnowledgeUpdates from "./knowledge-updates.vue";
+import KnowledgeOverview from "./knowledge-overview.vue";
+import KnowledgeChangeInbox from "./knowledge-change-inbox.vue";
 import { knowledgeNodeHasBody, knowledgeSelectedNodes } from "../knowledgeTreeModel";
 import { knowledgeDocumentSession, knowledgeLibraryTree, type KnowledgeDocumentContext } from "../knowledgeWorkTreeModel";
 import { knowledgeDocumentReviewActivity, knowledgeItemNeedsReview, knowledgeItemNeedsRunWork, knowledgeReviewLabel } from "../knowledgeReviewModel";
@@ -68,6 +70,8 @@ const workspaceName = computed(() => workspaces.byId.get(workspaceId.value)?.tit
 const snapshot = shallowRef<KnowledgeAssetsSnapshot | null>(null);
 const detail = ref<KnowledgeAssetDetail | null>(null);
 const selectedId = ref<string | null>(null);
+const overviewOpen = ref(true);
+const changeHistoryOpen = ref(false);
 type KnowledgeUpdateTarget = { scopeNodeId: string | null; changeId?: string | null; focusId?: string | null; report?: boolean; recoveryRunId?: string };
 const updatesTarget = shallowRef<KnowledgeUpdateTarget | null>(null);
 const updatesBusy = ref(false);
@@ -373,9 +377,9 @@ const previewReviewStatus = computed(() => {
   const report = previewReports.value[0];
   return report ? report.stale ? "复检已失效" : report.outcome === "passed" ? "复检通过" : report.outcome === "passed_with_warnings" ? "复检通过（有提醒）" : "发现问题" : previewReviewItem.value ? knowledgeReviewLabel(previewReviewItem.value) : "未复检";
 });
-const statusLabel = computed(() => node.value?.contentMode === "directory" ? "目录" : node.value?.contentMode === "reference" ? "实时引用" : detail.value?.drafts.length ? "有待采用版本" : detail.value?.current ? "已入库启用" : "待生成");
+const statusLabel = computed(() => node.value?.contentMode === "directory" ? "目录" : node.value?.contentMode === "reference" ? "实时引用" : detail.value?.drafts.length ? "有待采用版本" : detail.value?.current ? "已确认采用" : "待生成");
 /** 已入库启用用绿色标识；其余状态沿用默认标签样式。 */
-const statusColor = computed(() => statusLabel.value === "已入库启用" ? "green" : undefined);
+const statusColor = computed(() => statusLabel.value === "已确认采用" ? "green" : undefined);
 const thread = computed(() => assistantThreadId.value ? chat.threadSummaryById(assistantThreadId.value) : null);
 const threadRunning = computed(() => Boolean(chat.threadDisplayRunningStateForThread(assistantThreadId.value)?.runningTurnId));
 const knowledgeConversation = computed(() => conversations.value.find(c => c.threadId === assistantThreadId.value));
@@ -673,18 +677,17 @@ async function startConversation(nodeId: string | null = startNodeId.value): Pro
   if (recent) await connectConversation(recent.threadId);
   else await createConversation(nodeId);
 }
-/** 会话链接始终带上当前项目，避免刷新后恢复到其他工作区。 */
+/** 会话链接保留当前阅读视图，避免切换讨论时覆盖正文或概览意图。 */
 async function syncConversationRoute(threadId: string | null): Promise<void> {
   if (route.name !== "project-knowledge" || requestedThreadId.value === (threadId ?? "")) return;
   const query: LocationQueryRaw = { ...route.query };
-  delete query.view;
   if (threadId) query.threadId = threadId; else delete query.threadId;
   try { await router.replace({ name: "project-knowledge", query }); }
   catch (error) { reportError(error, "KNOWLEDGE_CONVERSATION_ROUTE_FAILED", { targetThreadId: threadId }); }
 }
 /** 恢复链接指定的规格会话，任务运行时显式阻止切换。 */
 async function connectRequestedConversation(id: string): Promise<void> {
-  if (id === assistantThreadId.value && bindingReady.value) { showProjectConversation.value = true; return; }
+  if (id === assistantThreadId.value && bindingReady.value) { showProjectConversation.value = true; assistantOpen.value = true; return; }
   if (binding.value || threadRunning.value || activeRun.value?.active) {
     message.warning("请先停止当前任务，再切换规格会话");
     await syncConversationRoute(assistantThreadId.value); return;
@@ -725,11 +728,12 @@ function preferredDocument(scopeId: string | null): KnowledgeAssetNode | null {
 /** 缓存与首屏共用同一选择恢复顺序；当前用户意图优先于刷新前的旧选择。 */
 function restoreSelectedNode(targetSnapshot: KnowledgeAssetsSnapshot, restored: KnowledgePageState | null, scope: WorkspaceId): void {
   const routeNodeId = typeof route.query.nodeId === "string" ? route.query.nodeId : null;
-  const candidateNodeId = routeNodeId ?? selectedNodeIntent.value ?? restored?.selectedId ?? null;
+  const candidateNodeId = route.query.view === "overview" ? null : routeNodeId ?? selectedNodeIntent.value ?? restored?.selectedId ?? null;
   const restoredNode = candidateNodeId && targetSnapshot.tree.nodes.some(item => item.id === candidateNodeId && !item.archived) ? candidateNodeId : null;
   selectedNodeIntent.value = candidateNodeId;
   selectedNodeIntentWorkspace = restoredNode ? scope : null;
   selectedId.value = restoredNode;
+  overviewOpen.value = route.query.view === "overview" || !candidateNodeId && !updatesTarget.value && !requestedExecutionThreadId.value && !requestedThreadId.value && route.query.view !== "assets";
   if (restoredNode && targetSnapshot.tree.nodes.find(item => item.id === restoredNode)?.contentMode === "directory") {
     const legacyFile = restored?.directoryPreviewId && knowledgeSelectedNodes(visibleTreeNodes.value, [restoredNode], true).find(item => item.id === restored.directoryPreviewId && item.contentMode !== "directory");
     selectedId.value = legacyFile ? legacyFile.id : preferredDocument(restoredNode)?.id ?? restoredNode;
@@ -757,7 +761,7 @@ function previousPageStateKey(): string {
 function legacyPageStateKey(): string {
   return `knowledge-page-state:${encodeURIComponent(JSON.stringify([config.serverWsOrigin, config.userSummary?.userId ?? "", workspaceId.value]))}`;
 }
-type KnowledgePageState = { selectedId: string | null; directoryPreviewId?: string | null; viewTab: "node" | "sources" | "review"; assistantOpen: boolean; selectedChangeId: string | null; updatesTarget: KnowledgeUpdateTarget | null };
+type KnowledgePageState = { selectedId: string | null; overviewOpen?: boolean; directoryPreviewId?: string | null; viewTab: "node" | "sources" | "review"; assistantOpen: boolean; selectedChangeId: string | null; updatesTarget: KnowledgeUpdateTarget | null };
 /** 读取本标签页上次的目录、面板和文档视图状态；损坏数据按空状态处理并记录错误。 */
 function restorePageState(): KnowledgePageState | null {
   if (typeof window === "undefined") return null;
@@ -773,7 +777,7 @@ function restorePageState(): KnowledgePageState | null {
     const target = value.updatesTarget && typeof value.updatesTarget === "object" ? value.updatesTarget as Record<string, unknown> : null;
     return { selectedId: typeof legacyNode === "string" ? legacyNode : typeof value.selectedId === "string" ? value.selectedId : null,
       directoryPreviewId: typeof value.directoryPreviewId === "string" ? value.directoryPreviewId : null,
-      viewTab, assistantOpen: value.assistantOpen === true,
+      viewTab, overviewOpen: value.overviewOpen === true, assistantOpen: value.assistantOpen === true,
       selectedChangeId: typeof value.selectedChangeId === "string" ? value.selectedChangeId : null,
       updatesTarget: target ? { scopeNodeId: typeof target.scopeNodeId === "string" ? target.scopeNodeId : null, changeId: typeof target.changeId === "string" ? target.changeId : null, focusId: typeof target.focusId === "string" ? target.focusId : null, report: target.report === true, recoveryRunId: typeof target.recoveryRunId === "string" ? target.recoveryRunId : undefined }
         : value.updatesOpen === true || value.pageView === "results" || value.pageView === "approvals" ? { scopeNodeId: typeof legacyNode === "string" ? legacyNode : null } : null };
@@ -785,7 +789,7 @@ function persistPageState(): void {
   try {
     // 后台快照不能清空用户已选节点，正文选择与左树保持一致。
     const persistedSelectedId = selectedId.value ?? selectedNodeIntent.value;
-    window.sessionStorage.setItem(pageStateKey(), JSON.stringify({ selectedId: persistedSelectedId, viewTab: viewTab.value, assistantOpen: assistantOpen.value, selectedChangeId: selectedChangeId.value, updatesTarget: updatesTarget.value } satisfies KnowledgePageState));
+    window.sessionStorage.setItem(pageStateKey(), JSON.stringify({ selectedId: overviewOpen.value ? null : persistedSelectedId, overviewOpen: overviewOpen.value, viewTab: viewTab.value, assistantOpen: assistantOpen.value, selectedChangeId: selectedChangeId.value, updatesTarget: updatesTarget.value } satisfies KnowledgePageState));
   }
   catch (error) { reportError(error, "KNOWLEDGE_PAGE_STATE_SAVE_FAILED"); }
 }
@@ -895,6 +899,7 @@ async function selectNode(id: string, preserveLink = false): Promise<boolean> {
   if (!preserveLink && !await clearApprovalRoute(targetId)) return false;
   if (!preserveLink) closeExecutionSession();
   const scope = workspaceId.value, epoch = scopeEpoch;
+  overviewOpen.value = false;
   searchFocus.value = null;
   if (documentReadError.value && errorText.value === documentReadError.value.message) dismissError();
   selectedNodeIntent.value = targetId;
@@ -906,6 +911,62 @@ async function selectNode(id: string, preserveLink = false): Promise<boolean> {
   const ticket = nodeEpoch;
   await reading;
   return isCurrent(epoch, scope) && selectedId.value === targetId && ticket === nodeEpoch;
+}
+
+/** 返回项目概览时清理文档定位，保留现有会话与后台任务。 */
+async function openOverview(): Promise<void> {
+  if (!await guardEdits()) return;
+  const query: LocationQueryRaw = { ...route.query, view: "overview" };
+  delete query.nodeId; delete query.changeId; delete query.executionThreadId;
+  try {
+    if (router.resolve({ name: "project-knowledge", query }).fullPath !== route.fullPath) {
+      const failure = await router.replace({ name: "project-knowledge", query });
+      if (failure) throw failure;
+    }
+  } catch (error) { errorText.value = reportError(error, "KNOWLEDGE_OVERVIEW_ROUTE_FAILED"); return; }
+  closeExecutionSession(); closeSearchResults();
+  selectedId.value = null; selectedNodeIntent.value = null; updatesTarget.value = null; selectedChangeId.value = null;
+  detail.value = null; previewDocument.value = null; previewRevisionId.value = null;
+  overviewOpen.value = true;
+  if (narrowScreen.value) treeOpen.value = false;
+  persistPageState();
+}
+
+/** 常用对话入口复用原会话；编辑等待期间切换工作区时不操作新页面。 */
+async function openSpecificationConversation(): Promise<void> {
+  const scope = workspaceId.value, epoch = scopeEpoch;
+  if (!await guardEdits() || !isCurrent(epoch, scope)) return;
+  assistantOpen.value = true; showProjectConversation.value = true;
+  if (narrowScreen.value) treeOpen.value = false;
+  if (!bindingReady.value) await startConversation();
+}
+
+/** 重新核对原提案前后复核工作区与会话；迟到结果不能预填其他项目。 */
+async function recheckKnowledgeChange(change: KnowledgeChangeDetail): Promise<void> {
+  if (!canWrite.value || busy.value || binding.value || threadRunning.value) return;
+  const scope = workspaceId.value, epoch = scopeEpoch;
+  await openSpecificationConversation();
+  if (!isCurrent(epoch, scope)) return;
+  if (bindingReady.value && boundNodeId.value !== null) await startConversation(null);
+  if (!isCurrent(epoch, scope)) return;
+  if (!bindingReady.value || !assistantThreadId.value || boundNodeId.value !== null) {
+    bindingError.value = bindingError.value || reportError(new Error("项目范围规格会话尚未就绪，原提案未发送，请重试连接"), "KNOWLEDGE_CHANGE_RECHECK_SCOPE_UNAVAILABLE", { nodeId: change.nodeId, changeId: change.id });
+    return;
+  }
+  const prompt = [
+    "请对照最新正式正文重新核对以下已过期的规格修改建议，保留用户原始要求和其他人的正确修改。",
+    `节点：${change.nodeId}；原提案：${change.id}；摘要：${change.summary}`,
+    `过期原因：${change.staleReasons.join("；")}`,
+    "先读取当前节点与直接来源，逐项判断原建议是否仍需要；冲突指出影响并询问，不能自动选择优先级。需要修订时提交新的待确认建议，旧提案保持可追溯，不直接修改正式文档。",
+    "原建议正文：", change.content,
+  ].join("\n\n");
+  composer.enqueueExternalAction({ workspaceId: scope, threadId: assistantThreadId.value, kind: "append-text", text: prompt });
+}
+
+/** 概览重试沿用已有状态与任务读取边界，失败仍在各自入口显示。 */
+async function retryOverview(): Promise<void> {
+  await refreshSnapshotStates(workspaceId.value, scopeEpoch, snapshot.value?.treeHash ?? null);
+  await refreshRuns();
 }
 
 /** 未保存编辑离开时提供保存、放弃和继续编辑，写入失败不会继续导航。 */
@@ -930,7 +991,17 @@ async function setContentView(value: "node" | "sources" | "review"): Promise<voi
 async function openUpdates(scopeNodeId: string | null = selectedId.value): Promise<boolean> {
   const scope = workspaceId.value, epoch = scopeEpoch;
   if (!await guardEdits() || !isCurrent(epoch, scope)) return false;
+  const query: LocationQueryRaw = { ...route.query, view: "results" };
+  delete query.changeId; delete query.executionThreadId;
+  try {
+    if (router.resolve({ name: "project-knowledge", query }).fullPath !== route.fullPath) {
+      const failure = await router.replace({ name: "project-knowledge", query });
+      if (failure) throw failure;
+    }
+  } catch (error) { errorText.value = reportError(error, "KNOWLEDGE_UPDATES_ROUTE_FAILED"); return false; }
+  if (!isCurrent(epoch, scope)) return false;
   closeExecutionSession();
+  overviewOpen.value = false;
   updatesTarget.value = { scopeNodeId }; selectedChangeId.value = null;
   if (narrowScreen.value) { treeOpen.value = false; assistantOpen.value = false; }
   return true;
@@ -941,6 +1012,7 @@ function closeUpdates(): void {
   if (updatesBusy.value) return;
   closeExecutionSession();
   updatesTarget.value = null; selectedChangeId.value = null; suppressAutoPreview.value = readingNodeId.value;
+  overviewOpen.value = route.query.view === "overview" || route.query.view !== "assets" && !readingNodeId.value;
   clearApprovalRoute();
 }
 
@@ -949,6 +1021,12 @@ async function updatesChanged(run?: KnowledgeGenerationRunView): Promise<void> {
   if (run) receiveRun(run);
   try { await refreshSnapshot(); await refreshPendingChanges(workspaceId.value, scopeEpoch); }
   catch (error) { errorText.value = reportError(error, "KNOWLEDGE_UPDATES_REFRESH_FAILED"); }
+}
+
+/** 历史建议采用后同步正式快照和正在阅读的正文，不只刷新后台任务。 */
+async function historyChangeReviewed(): Promise<void> {
+  await updatesChanged();
+  if (readingNodeId.value) await readNode(readingNodeId.value);
 }
 
 /** 成功采用后重读正式事实；批量仍有待办时保留清单，否则交付当前正文。 */
@@ -1316,12 +1394,13 @@ async function restoreKnowledgeConversationInBackground(scope: WorkspaceId, epoc
     if (!isCurrent(epoch, scope)) return;
     conversations.value = availableConversations;
     for (const conversation of availableConversations) upsertKnowledgeThreadSummary(conversation);
+    if (requestedExecutionThreadId.value) return;
     if (requestedThreadId.value) await connectRequestedConversation(requestedThreadId.value);
     else {
       const restored = restoreConversation();
       const previous = conversations.value.find(c => c.threadId === restored?.threadId && c.active)
         ?? sortedConversations.value.find(c => c.nodeId === null && c.active && c.createdByUserId === conversationActorId.value);
-      if (previous) await connectConversation(previous.threadId);
+      if (previous) await connectConversation(previous.threadId, false);
     }
   } catch (error) {
     if (isCurrent(epoch, scope) && !isAborted(error)) {
@@ -1329,7 +1408,7 @@ async function restoreKnowledgeConversationInBackground(scope: WorkspaceId, epoc
       assistantOpen.value = true;
     }
   } finally {
-    if (isCurrent(epoch, scope)) conversationLoading.value = false;
+    if (isCurrent(epoch, scope)) { conversationLoading.value = false; await drainRequestedConversation(); }
   }
 }
 /** 按工作区重建页面状态，隔离旧目录、选择和异步读取结果。 */
@@ -1349,11 +1428,12 @@ async function load(): Promise<void> {
   conversationLoading.value = false;
   buildStarting.value = false; pendingBuild.value = null; pendingBatch.value = null;
   editing.value = false; editContent.value = ""; errorText.value = null; errorDiagnostics.value = null;
-  const restoreUpdates = route.query.view === "results" || route.query.view === "approvals" || typeof route.query.changeId === "string" || Boolean(restoredPage?.updatesTarget);
-  updatesTarget.value = typeof route.query.changeId === "string" ? { scopeNodeId: null, changeId: route.query.changeId }
-    : route.query.view === "assets" ? null : restoredPage?.updatesTarget ?? (restoreUpdates ? { scopeNodeId: null } : null);
+  const explicitContentView = route.query.view === "overview" || route.query.view === "assets";
+  const restoreUpdates = !explicitContentView && (route.query.view === "results" || route.query.view === "approvals" || typeof route.query.changeId === "string" || Boolean(restoredPage?.updatesTarget));
+  updatesTarget.value = explicitContentView ? null : typeof route.query.changeId === "string" ? { scopeNodeId: null, changeId: route.query.changeId }
+    : restoredPage?.updatesTarget ?? (restoreUpdates ? { scopeNodeId: null } : null);
   suppressAutoPreview.value = null; maintenanceRunId.value = null;
-  selectedChangeId.value = typeof route.query.changeId === "string" ? route.query.changeId : restoredPage?.selectedChangeId ?? null;
+  selectedChangeId.value = explicitContentView ? null : typeof route.query.changeId === "string" ? route.query.changeId : restoredPage?.selectedChangeId ?? null;
   pendingChangeNodes.value = [];
   checkedIds.value = []; conversations.value = []; taskList.value = []; resultsLoadError.value = null; batchOpen.value = false; sessionMenuOpen.value = false;
   busy.value = false; binding.value = false; nodeLoading.value = false; loading.value = false;
@@ -1437,8 +1517,8 @@ async function load(): Promise<void> {
     }
   }
 }
-/** 恢复所属知识会话，保留当前阅读上下文。 */
-async function activateConversation(value: KnowledgeConversationSummary, epoch: number, scope: WorkspaceId, requestedId: string): Promise<void> {
+/** 主动连接才切换讨论面板；后台恢复只准备会话，不抢正文工作会话。 */
+async function activateConversation(value: KnowledgeConversationSummary, epoch: number, scope: WorkspaceId, requestedId: string, revealDiscussion: boolean): Promise<void> {
   if (!isCurrent(epoch, scope) || requestedThreadId.value !== requestedId) return;
   await chat.ensureThreadHydrated(ctx(), { workspaceId: scope, threadId: value.threadId as ThreadId });
   if (!isCurrent(epoch, scope) || requestedThreadId.value !== requestedId) return;
@@ -1446,10 +1526,15 @@ async function activateConversation(value: KnowledgeConversationSummary, epoch: 
   conversations.value = [value, ...conversations.value.filter(c => c.threadId !== value.threadId)]; sessionMenuOpen.value = false;
   assistantThreadId.value = value.threadId as ThreadId; boundNodeId.value = value.nodeId; initialEngine.value = value.engine;
   bindingReady.value = true; rememberConversation(value.threadId as ThreadId, value.nodeId);
+  if (revealDiscussion) { showProjectConversation.value = true; assistantOpen.value = true; }
   await refreshRuns();
-  if (isCurrent(epoch, scope) && requestedThreadId.value === requestedId) await syncConversationRoute(value.threadId);
+  if (revealDiscussion && isCurrent(epoch, scope) && requestedThreadId.value === requestedId) await syncConversationRoute(value.threadId);
+  if (revealDiscussion && isCurrent(epoch, scope) && assistantThreadId.value === value.threadId && requestedThreadId.value === value.threadId) {
+    showProjectConversation.value = true; assistantOpen.value = true;
+  }
 }
-async function connectConversation(id?: string): Promise<void> {
+/** 复用原连接鉴权，后台调用通过 revealDiscussion 保留当前阅读面板。 */
+async function connectConversation(id?: string, revealDiscussion = true): Promise<void> {
   if (binding.value || !canWrite.value || threadRunning.value || activeRun.value?.active) return;
   const target = id ?? assistantThreadId.value;
   if (!target) { await startConversation(); return; }
@@ -1457,7 +1542,7 @@ async function connectConversation(id?: string): Promise<void> {
   binding.value = true; bindingReady.value = false; bindingError.value = null;
   try {
     const value = unwrap(await requestKnowledgeAsset(ctx(), "conversation.connect", { workspaceId: scope, threadId: target }, { method: "POST" }));
-    await activateConversation(value, epoch, scope, requestedId);
+    await activateConversation(value, epoch, scope, requestedId, revealDiscussion);
   } catch (error) {
     if (isCurrent(epoch, scope) && requestedThreadId.value === requestedId) {
       bindingError.value = reportError(error, "KNOWLEDGE_CONVERSATION_CONNECT_FAILED");
@@ -1513,7 +1598,7 @@ async function createConversation(nodeId: string | null): Promise<void> {
       model: prefs.model,
       effort: prefs.effort,
     }, { method: "POST" }));
-    await activateConversation(value, epoch, scope, requestedId);
+    await activateConversation(value, epoch, scope, requestedId, true);
   } catch (error) {
     if (isCurrent(epoch, scope) && requestedThreadId.value === requestedId) {
       if (assistantThreadId.value === previousThreadId) bindingReady.value = previousReady;
@@ -1533,7 +1618,7 @@ async function ensureRunConversation(run: KnowledgeGenerationRunView): Promise<b
   if (ownerId === assistantThreadId.value && bindingReady.value) return true;
   if (binding.value || threadRunning.value || activeRun.value?.active) throw new Error("请先停止当前会话的任务，再继续这份历史任务");
   const scope = workspaceId.value, epoch = scopeEpoch;
-  await connectConversation(ownerId);
+  await connectConversation(ownerId, false);
   if (!isCurrent(epoch, scope)) return false;
   if (!bindingReady.value || assistantThreadId.value !== ownerId) throw new Error(bindingError.value || "原规格会话未连接，请稍后重试");
   return true;
@@ -1601,7 +1686,7 @@ async function applyKnowledgeModelPrefs(engine: EngineType, selected?: { model: 
       const value = await createTaskConversation(engine, prefs.model, prefs.effort, scope);
       if (!isCurrent(epoch, scope) || requestedThreadId.value !== requestedId) return false;
       if (draft && chat.setPendingLocalThreadDraft(value.threadId as ThreadId, draft, { workspaceScopeToken: draftScope }) === null) throw new Error("工作区已变化，未切换规格会话");
-      await activateConversation(value, epoch, scope, requestedId);
+      await activateConversation(value, epoch, scope, requestedId, true);
       if (!isCurrent(epoch, scope) || assistantThreadId.value !== value.threadId) return false;
     } else if (oldId) {
       const patch = { model: prefs.model, effort: prefs.effort };
@@ -2115,7 +2200,7 @@ watch(requestedThreadId, id => {
   if (shouldDeferRouteThread()) pendingRouteThreadId = id;
   else void connectRequestedConversation(id);
 });
-watch([selectedId, viewTab, assistantOpen, updatesTarget, selectedChangeId], persistPageState);
+watch([selectedId, overviewOpen, viewTab, assistantOpen, updatesTarget, selectedChangeId], persistPageState);
 watch(requestedExecutionThreadId, id => {
   if (!snapshot.value) return;
   if (!id) { closeExecutionSession(); return; }
@@ -2137,7 +2222,10 @@ watch([() => displayedExecutionSession.value?.threadId, assistantOpen, fileConve
 watch(() => [route.query.view, route.query.changeId], ([view, changeId], previous) => {
   if (typeof changeId === "string") { selectedChangeId.value = changeId; updatesTarget.value = { scopeNodeId: null, changeId }; }
   else if (view === "results" || view === "approvals") { selectedChangeId.value = null; updatesTarget.value = { scopeNodeId: null }; }
-  else if (view === "assets" || previous?.some(value => value != null)) closeUpdates();
+  else if (view === "assets" || view === "overview") {
+    closeExecutionSession(); updatesTarget.value = null; selectedChangeId.value = null;
+    suppressAutoPreview.value = readingNodeId.value; overviewOpen.value = view === "overview";
+  } else if (previous?.some(value => value != null)) closeUpdates();
 });
 onBeforeRouteLeave(() => guardEdits());
 /** 采用完成时只允许本次内部文件定位通过，其他导航继续等待子组件解锁。 */
@@ -2151,7 +2239,7 @@ onBeforeRouteUpdate((next, previous) => {
 });
 /** 首次进入与迟到目录共用左树选择；后台状态不抢占已打开的文件或审批。 */
 watch([visibleTreeNodes, snapshotStatesReady, resultsLoading, loading], () => {
-  if (loading.value || updatesTarget.value || updatesBusy.value || editing.value) return;
+  if (loading.value || updatesTarget.value || updatesBusy.value || editing.value || overviewOpen.value) return;
   if (!selectedId.value && selectedNodeIntent.value && nodeMap.value.has(selectedNodeIntent.value)) { void selectNode(selectedNodeIntent.value, true); return; }
   if (!snapshotStatesReady.value || resultsLoading.value || selectedNode.value && selectedNode.value.contentMode !== "directory") return;
   const target = preferredDocument(selectedId.value);
@@ -2202,8 +2290,10 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
       </div>
       <div class="header-actions">
         <a-tag v-if="snapshot && !canWrite">只读</a-tag>
-        <a-button size="middle" :disabled="!canWrite || busy || updatesBusy" @click="openImport(importDirectory)">导入文档</a-button>
-        <a-dropdown :trigger="['click']"><a-button size="middle" aria-label="规格库更多操作">更多</a-button><template #overlay><a-menu><a-menu-item v-if="visibleWorkTree.targetCount || visibleWorkTree.generatingCount" :disabled="updatesBusy" @click="openUpdates(null)">{{ visibleWorkTree.targetCount ? '待确认更新' : '生成中' }}</a-menu-item><a-menu-item @click="policyOpen = true">管理策略</a-menu-item><a-menu-item :disabled="!canWrite || !nodeCount" @click="updateSettingsOpen = true">定时更新</a-menu-item><a-menu-divider /><a-menu-item :disabled="!canWrite || busy || updatesBusy || !nodeCount" @click="openBatch()">高级生成</a-menu-item><a-menu-item :disabled="!canWrite || busy || updatesBusy || !nodeCount" @click="openReview()">复检所选知识</a-menu-item></a-menu></template></a-dropdown>
+        <a-button :size="narrowScreen ? 'small' : 'middle'" :disabled="!canWrite || busy || updatesBusy || binding || conversationLoading" @click="openSpecificationConversation">规格对话</a-button>
+        <a-button :size="narrowScreen ? 'small' : 'middle'" :disabled="busy || updatesBusy" @click="openUpdates(null)">待确认更新 <span v-if="visibleWorkTree.targetCount">{{ visibleWorkTree.targetCount }}</span></a-button>
+        <a-button :size="narrowScreen ? 'small' : 'middle'" type="primary" :loading="buildStarting" :disabled="!canWrite || busy || updatesBusy || !snapshotStatesReady || taskList.some(run => run.active)" @click="startBuild(checkedIds.length ? checkedIds : [])">完善规格</a-button>
+        <a-dropdown :trigger="['click']"><a-button :size="narrowScreen ? 'small' : 'middle'" aria-label="规格库更多操作">更多</a-button><template #overlay><a-menu><a-menu-item :disabled="!canWrite || busy || updatesBusy" @click="openImport(importDirectory)">导入文档</a-menu-item><a-menu-item @click="changeHistoryOpen = true">修改建议记录</a-menu-item><a-menu-item @click="policyOpen = true">管理策略</a-menu-item><a-menu-item :disabled="!canWrite || !nodeCount" @click="updateSettingsOpen = true">定时更新</a-menu-item><a-menu-divider /><a-menu-item :disabled="!canWrite || busy || updatesBusy || !nodeCount" @click="openBatch()">高级生成</a-menu-item><a-menu-item :disabled="!canWrite || busy || updatesBusy || !nodeCount" @click="openReview()">复检所选知识</a-menu-item></a-menu></template></a-dropdown>
       </div>
     </header>
     <nav class="mobile-panels" aria-label="规格库面板"><button type="button" aria-label="规格库目录" :aria-expanded="treeOpen" @click="openMobilePanel('tree')">{{ treeTitle }} <span>{{ visibleTreeCount }}</span></button><button type="button" aria-label="AI 对话" :aria-expanded="assistantOpen" @click="openMobilePanel('assistant')">✦ AI 对话 <span v-if="threadRunning || activeRun?.active" class="working-indicator" /></button></nav>
@@ -2244,6 +2334,7 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
             </section>
           </div>
         </div>
+        <a-button class="overview-link" type="text" :aria-pressed="overviewOpen" :disabled="busy || updatesBusy" @click="openOverview">项目概览</a-button>
         <a-skeleton v-if="treeLoading" active :paragraph="{ rows: 7 }" />
         <KnowledgeAssetTree v-else :nodes="visibleTreeNodes" :states="snapshot?.states ?? []" :selected-id="selectedId" :workspace-key="treeStorageKey()" :legacy-workspace-key="conversationStorageKey()" :can-write="canWrite && !busy && !updatesBusy" :busy="busy || updatesBusy" :counts="visibleWorkTree.documentCounts" :structure-counts="visibleWorkTree.structureCounts" :generating-counts="visibleWorkTree.generatingCounts" :new-node-ids="visibleWorkTree.newIds" :empty-text="treeEmptyText" :selection-reset-key="selectionResetKey" @select="selectTreeNode" @checked-change="checkedIds = $event" @generate="startBuild([$event])" @review="openReview([$event], true)" @updates="openUpdates($event)" />
         <footer aria-label="规格库统计"><a-button v-if="snapshotStatesError" type="text" size="small" :disabled="resultsLoading || Boolean(activeRun?.active)" :title="snapshotStatesError" @click="refreshSnapshotStates(workspaceId, scopeEpoch, snapshot?.treeHash ?? null)">状态读取失败，重试</a-button><a-spin v-else-if="snapshot && !snapshotStatesReady" size="small" /><template v-else><span><i class="legend-dot ready" />已有 {{ readyCount }}</span><span><i class="legend-dot" />待生成 {{ emptyCount }}</span><span v-if="visibleWorkTree.generatingCount"><i class="legend-dot generating" />生成中 {{ visibleWorkTree.generatingCount }}</span><span><i class="legend-dot draft" />待确认 {{ draftCount }}</span></template></footer>
@@ -2261,7 +2352,8 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
           <section class="reading-document">
         <!-- 采用至结果定位完成前持续加载，保留组件执行请求和失败恢复。 -->
         <div v-if="showUpdates && updatesBusy" class="node-loading" role="status" aria-live="polite" aria-busy="true"><a-spin aria-hidden="true" /><span>加载中</span></div>
-        <KnowledgeUpdates v-if="showUpdates" v-show="!updatesBusy" :workspace-id="workspaceId" :context="ctx()" :nodes="visibleTreeNodes" :formal-nodes="snapshot?.tree.nodes ?? []" :runs="taskList" :updates="visibleWorkTree.updates" :scope-node-id="updatesTarget?.scopeNodeId ?? (updatesTarget ? null : readingNodeId)" :change-id="updatesTarget?.changeId" :focus-id="updatesTarget?.focusId" :focus-report="updatesTarget?.report" :recovery-run-id="updatesTarget?.recoveryRunId" :after-apply="afterApply" @focus="rememberUpdateFocus" @preview="updatePreview = $event" :can-write="canWrite" :actions-busy="busy || threadRunning || executionThreadRunning || Boolean(activeRun?.active) || Boolean(pendingBatch)" @review="openReview([$event], false)" @resume-review="resumeCandidateReview" @repair="repairReport" @repair-issue="repairIssue" @return-to-generation="returnToGeneration" @close="closeUpdates" @changed="updatesChanged" @open-file="openWorkspaceFile" @busy="handleUpdatesBusy" @error="(cause, context) => errorText = reportError(cause, 'KNOWLEDGE_UPDATES_FAILED', context)" />
+        <KnowledgeUpdates v-if="showUpdates" v-show="!updatesBusy" :workspace-id="workspaceId" :context="ctx()" :nodes="visibleTreeNodes" :formal-nodes="snapshot?.tree.nodes ?? []" :runs="taskList" :updates="visibleWorkTree.updates" :scope-node-id="updatesTarget?.scopeNodeId ?? (updatesTarget ? null : readingNodeId)" :change-id="updatesTarget?.changeId" :focus-id="updatesTarget?.focusId" :focus-report="updatesTarget?.report" :recovery-run-id="updatesTarget?.recoveryRunId" :after-apply="afterApply" @focus="rememberUpdateFocus" @preview="updatePreview = $event" :can-write="canWrite" :actions-busy="busy || threadRunning || executionThreadRunning || Boolean(activeRun?.active) || Boolean(pendingBatch)" @recheck="recheckKnowledgeChange" @review="openReview([$event], false)" @resume-review="resumeCandidateReview" @repair="repairReport" @repair-issue="repairIssue" @return-to-generation="returnToGeneration" @close="closeUpdates" @changed="updatesChanged" @open-file="openWorkspaceFile" @busy="handleUpdatesBusy" @error="(cause, context) => errorText = reportError(cause, 'KNOWLEDGE_UPDATES_FAILED', context)" />
+        <KnowledgeOverview v-else-if="overviewOpen" :snapshot="snapshot" :runs="taskList" :changes="pendingChangeNodes" :loading="loading || Boolean(snapshot && !snapshotStatesReady && !snapshotStatesError)" :state-error="snapshotStatesError" :run-error="resultsLoadError" :can-write="canWrite" :busy="busy || updatesBusy || buildStarting || binding || conversationLoading || taskList.some(run => run.active)" @improve="startBuild([])" @discuss="openSpecificationConversation" @updates="openUpdates(null)" @select="selectTreeNode" @retry="retryOverview" />
         <!-- 尚未确定正式正文或候选预览时保持加载，避免先渲染普通正文页。 -->
         <div v-else-if="documentReadError" class="empty" role="alert"><h3>文档读取失败</h3><p>{{ documentReadError.message }}</p><a-button :disabled="busy || updatesBusy" @click="retryReadDocument">重新读取文档</a-button></div>
         <div v-else-if="readingPending" class="node-loading" role="status" aria-live="polite" aria-busy="true"><a-spin aria-hidden="true" /><span>加载中</span></div>
@@ -2400,6 +2492,7 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
       <div class="batch-scroll">
       <p v-if="buildSettingsMode" class="batch-explanation">目标项目：{{ workspaceName }}</p>
       <p class="batch-explanation">{{ buildSettingsMode ? '保存后同步规格协作及后续构建配置；切换引擎会新建会话并保留草稿。已创建任务保留原配置。默认自动复检最多 2 轮，结果统一预览后采用。' : '本次任务在后台执行，无需打开或切换规格会话。' }}</p>
+      <details class="batch-advanced" :open="buildSettingsMode || batchMode === 'review'"><summary>引擎、模型与复检设置</summary>
       <section class="batch-model-settings" aria-label="本批次引擎配置">
         <div class="batch-model-heading"><strong>执行引擎</strong></div>
         <label class="batch-engine-field"><span>引擎</span><select v-model="batchEngine" aria-label="批量生成引擎" :disabled="batchLocked" @change="changeBatchEngineEvent">
@@ -2440,6 +2533,7 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
         <label><span>同时处理知识</span><input v-model.number="batchConcurrency" type="number" min="1" :max="MAX_BATCH_CONCURRENCY" step="1" inputmode="numeric" aria-label="批次并发数" :disabled="batchLocked" @change="normalizeBatchConcurrency" /></label>
         <p class="batch-model-note">可填写 1 到 {{ MAX_BATCH_CONCURRENCY }}。这是本批次实际并发目标；Client 当前全局上限为 {{ activeRun?.scheduler?.limit ?? 5 }}，达到目标后才会排队。</p>
       </div>
+      </details>
       <p v-if="!buildSettingsMode" class="batch-explanation">本次处理 {{ batchTargets.length }} 项。{{ batchMode === 'review' ? '仅复检，不重新生成文档。' : batchRepairReports.length ? '读取报告中的问题和证据生成修订草稿，保留现有版本。' : batchStrategy === 'all' ? '按当前要求逐项判断：已有知识修改或补充，没有知识生成；目录结构调整通过右侧规格会话提交计划。' : '只补齐没有正文的知识，已有内容保持不变。' }}</p>
       <div v-if="!buildSettingsMode" class="batch-preview">
         <div v-for="item in batchTargets" :key="item.id">{{ pathTitle(item) }}</div>
@@ -2451,6 +2545,9 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
       <div class="batch-submit"><a-button :disabled="busy || binding" @click="batchOpen = false">取消</a-button><a-button v-if="buildSettingsMode" type="primary" :loading="binding" :disabled="modelSettingsBlocked || batchCatalog?.loading" @click="saveBuildSettings">{{ pendingBuildIds ? '保存并开始生成' : '保存构建设置' }}</a-button><a-button v-else type="primary" :loading="busy" :disabled="!batchTargets.length || !canWrite || threadRunning || Boolean(activeRun?.active) || batchCatalog?.loading" @click="submitBatch">{{ pendingBatch ? '重试原任务' : batchMode === 'review' ? '开始复检' : batchRepairReports.length ? '开始生成修订版' : '开始生成' }}</a-button></div>
     </a-modal>
 
+    <a-drawer v-model:open="changeHistoryOpen" title="修改建议记录" width="min(1100px, 96vw)" :body-style="{ padding: 0, display: 'flex', minHeight: 0 }">
+      <KnowledgeChangeInbox v-if="changeHistoryOpen" :workspace-id="workspaceId" :context="ctx()" :can-write="canWrite" @recheck="changeHistoryOpen = false; recheckKnowledgeChange($event)" @changed="historyChangeReviewed" />
+    </a-drawer>
     <KnowledgeManagementPolicy v-model:open="policyOpen" />
     <a-modal :open="Boolean(pendingEditDecision)" title="这份文档还有未保存修改" :footer="null" @cancel="pendingEditDecision?.('stay')"><p>保存后继续、放弃修改，或留在当前文档继续编辑。</p><div class="quick-actions"><a-button @click="pendingEditDecision?.('stay')">继续编辑</a-button><a-button danger @click="pendingEditDecision?.('discard')">放弃修改</a-button><a-button type="primary" @click="pendingEditDecision?.('save')">保存并继续</a-button></div></a-modal>
     <a-modal v-model:open="importOpen" title="选择项目文档导入" wrap-class-name="knowledge-import-modal" :closable="!busy" :mask-closable="!busy" :keyboard="!busy" width="min(880px, calc(100vw - 32px))" :style="{ top: '24px' }" :body-style="{ paddingTop: '12px' }">
@@ -2529,6 +2626,8 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
 .panel-heading .ant-btn:not(.ant-btn-primary) { color: var(--app-muted); }
 .tree-head .panel-heading { gap: 6px; }
 .tree-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overview-link.ant-btn { flex: 0 0 auto; margin: 0 10px 8px; text-align: left; color: var(--app-muted); }
+.overview-link[aria-pressed="true"] { color: var(--app-accent); background: var(--app-sidebar-hover-bg); }
 .tree-batch-actions { display: flex; flex: 0 0 auto; }
 .tree-batch-button.ant-btn { min-width: 0; height: 26px; min-height: 26px; padding: 2px 7px; overflow: hidden; border-radius: 5px; font-size: 11px; line-height: 20px; }
 .all-work-link { padding: 0; color: var(--app-muted); }
@@ -2611,6 +2710,7 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
 .conversation-picker { width: 100%; min-width: 0; }
 .task-controls { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
 .batch-explanation { color: var(--app-muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.batch-advanced > summary { cursor: pointer; color: var(--app-muted); font-size: 12px; padding-block: 8px; }
 .batch-scroll { max-height: calc(100dvh - 180px); min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 3px; }
 .batch-model-settings { padding-block: 8px; border-block: 1px solid var(--app-divider); margin-block: 8px; }
 .batch-model-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: 13px; color: var(--app-text); }
@@ -2721,11 +2821,11 @@ onBeforeUnmount(() => { scopeEpoch += 1; nodeEpoch += 1; readController?.abort()
 }
 @media (max-width: 560px) {
   .batch-model-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .page-header { flex-wrap: wrap; gap: 6px 8px; padding: 6px 12px; }
-  .header-actions { flex: 0 0 auto; padding: 0; }
-  .page-nav { flex: 1; min-width: 0; }
+  .page-header { display: grid; grid-template-columns: minmax(0, 110px) minmax(0, 1fr); gap: 6px 8px; padding: 6px 12px; }
+  .header-actions { grid-column: 1 / -1; padding: 0; justify-content: flex-end; }
+  .page-nav { min-width: 0; }
   .page-nav .ant-tag { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .knowledge-search { order: 3; width: 100%; max-width: none; min-width: 0; flex-basis: 100%; }
+  .knowledge-search { grid-column: 2; grid-row: 1; width: 100%; max-width: none; min-width: 0; }
   .search-results-popover { top: 72px; width: calc(100% - 24px); }
   .conversation-start { padding: 24px; }
   .main-nav, .main-head, .content { padding-inline: 12px; }

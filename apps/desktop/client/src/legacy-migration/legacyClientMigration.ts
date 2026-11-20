@@ -50,10 +50,10 @@ const PROFILE_TABLES = ['workspace_execution_profiles', 'workspace_prefs', 'sche
 const CACHE_TABLES = ['conversation_presentations', 'conversation_presentation_items', 'orch_list_status_count_cache'];
 const WORKSPACE_TABLES = [...new Set([...WORKSPACE_CORE_TABLES, ...WORKSPACE_ADDITIONAL_TABLES, ...PROFILE_TABLES])]
   .filter(table => table !== 'meta' && !CACHE_TABLES.includes(table));
-const LEGACY_HISTORY_TABLES = ['engine_events', 'conversation_items'];
 const RETIRED_TABLES = ['notes', 'orch_asset_bundle_sync', 'orch_asset_cache_entries', 'orch_asset_cache_group_assignments',
   'orch_asset_cache_groups', 'orch_asset_cache_skill_files', 'orch_asset_cache_state', 'orch_asset_cache_sync_pages',
-  'orch_asset_cache_sync_runs', 'orch_asset_legacy_authority_state', 'orch_asset_migration_lock_state'];
+  'orch_asset_cache_sync_runs', 'orch_asset_legacy_authority_state', 'orch_asset_migration_lock_state',
+  'engine_events', 'conversation_items'];
 const REFERENCE_KEYS = new Set(['workspaceId', 'workspace_id', 'workspaceScopeId', 'workspace_scope_id',
   'sourceWorkspaceId', 'targetWorkspaceId', 'localWorkspaceId', 'hostWorkspaceId']);
 
@@ -391,9 +391,8 @@ async function convertSnapshots(input: Input, journal: Journal, dependencies: Le
   const app = openSqliteDb(appPath, { fileMustExist: true });
   let failure: unknown;
   try {
-    assertApplicationSource(app); migrateClientDb(app);
+    assertApplicationSource(app); migrateClientDb(app); dropRetiredTables(app);
     assertKnownTables(app);
-    for (const table of LEGACY_HISTORY_TABLES) if (tableCount(app, table)) fail('SOURCE_LEGACY_HISTORY_UNSUPPORTED');
     if ((app.prepare("SELECT operation_id FROM workspace_directory_migrations WHERE state NOT IN ('completed','cancelled','failed') LIMIT 1").get())) fail('SOURCE_WORKSPACE_MOVE_ACTIVE');
     const mapping = new Map(journal.source.workspaces.map(work => [String(work.id), mappedWorkspaceId(work.id, journal.source.sourceClientId, input.targetClientId)]));
     for (const [oldId, newId] of mapping) new WorkspaceRepo(app).migrateWorkspaceId(oldId as WorkspaceId, newId as WorkspaceId);
@@ -416,7 +415,7 @@ async function convertSnapshots(input: Input, journal: Journal, dependencies: Le
           fs.copyFileSync(path.join(snapshotDirectory(input, journal), `source-workspace-${index}.db`), converted, fs.constants.COPYFILE_EXCL);
           withDatabase(converted, false, previous => {
             assertKnownTables(previous); assertWorkspaceOwnership(previous, source.id);
-            for (const table of LEGACY_HISTORY_TABLES) if (tableCount(previous, table)) fail('SOURCE_LEGACY_HISTORY_UNSUPPORTED');
+            dropRetiredTables(previous);
             migrateClientDb(previous, { scope: 'workspace' }); ensureWorkspaceCoreQueueTables(previous); ensureWorkspaceAdditionalTables(previous);
             rewriteBusinessReferences(previous, mapping);
             for (const table of listTables(previous)) {
@@ -757,22 +756,27 @@ function assertApplicationSource(db: SqliteDb): void {
   assertKnownTables(db);
 }
 
-/** 当前建表即数据提取清单；FTS shadow 只接受已声明虚表对应的 SQLite 内部表。 */
+/** 退役表只保留在来源快照；FTS shadow 只接受已声明虚表对应的 SQLite 内部表。 */
 function assertKnownTables(db: SqliteDb): void {
   const reference = openSqliteDb(':memory:');
   try {
     migrateClientDb(reference);
     const known = new Set(listTables(reference));
     for (const table of listTables(db)) {
-      if (RETIRED_TABLES.includes(table)) {
-        if (tableCount(db, table)) throw Object.assign(migrationError('SOURCE_RETIRED_DATA_UNSUPPORTED'), { table });
-        continue;
-      }
+      if (RETIRED_TABLES.includes(table)) continue;
       if (!known.has(table)) fail('SOURCE_TABLE_UNSUPPORTED');
       const expected = columns(reference, table);
       if (columns(db, table).some(column => !expected.includes(column))) fail('SOURCE_SCHEMA_UNSUPPORTED');
     }
   } finally { reference.close(); }
+}
+
+/** 只从目标临时副本移除已确认退役的表，来源数据库及其只读归档保持完整。 */
+function dropRetiredTables(db: SqliteDb): void {
+  db.pragma('foreign_keys = OFF');
+  try {
+    for (const table of RETIRED_TABLES) db.exec(`DROP TABLE IF EXISTS ${quote(table)}`);
+  } finally { db.pragma('foreign_keys = ON'); }
 }
 
 /** 工作区库的所有直接归属必须与注册表一致，阻止认领同路径的其他 Client 数据。 */

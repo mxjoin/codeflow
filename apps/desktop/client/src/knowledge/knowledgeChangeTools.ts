@@ -4,6 +4,7 @@ import { KnowledgeChangeStore } from "./knowledgeChangeStore.js";
 import { KnowledgeAssetError } from "./knowledgeAssetFiles.js";
 import { executeKnowledgeAssetReadTool, knowledgeTool } from "./knowledgeAssetTools.js";
 import type { HostToolExecutionResult } from "../engines/threadSession.js";
+import type { createKnowledgeSpecificationTurn } from "./knowledgeSpecificationTurn.js";
 
 export const KNOWLEDGE_CHANGE_RULE = [
   "发现知识与代码、已确认需求不一致时，读取当前节点与直接证据，用 knowledge.change.propose 保存完整修改建议。",
@@ -33,12 +34,24 @@ export function createKnowledgeSuggestionTurn(input: {
   store: KnowledgeAssetStore; workspaceId: string; threadId: string; turnId: string; engine: EngineType;
   origin: "chat" | "workflow"; canPropose: boolean; isActive: () => boolean;
   emit: (event: ConversationEventInput) => void;
+  specificationTurn?: ReturnType<typeof createKnowledgeSpecificationTurn> | null;
 }) {
   const changes = new Map<string, string>();
   let revision = 0;
   return {
     execute(toolId: string, raw: unknown): HostToolExecutionResult {
-      if (toolId !== "knowledge.change.propose") return executeKnowledgeAssetReadTool(input.store, toolId, raw);
+      if (toolId === "knowledge.acceptance.record") {
+        if (!input.specificationTurn) throw new KnowledgeAssetError("KNOWLEDGE_ASSET_INPUT_REQUIRED", "当前回合尚未提供可追踪规格，不能记录验收依据", 400);
+        return input.specificationTurn.record(raw);
+      }
+      if (toolId !== "knowledge.change.propose") {
+        const result = executeKnowledgeAssetReadTool(input.store, toolId, raw);
+        if (toolId === "knowledge.rules.read" && result.ok && input.specificationTurn) {
+          const value = raw as { paths?: string[] };
+          input.specificationTurn.recordRules(result.output as ReturnType<KnowledgeAssetStore["rules"]>, value.paths ?? []);
+        }
+        return result;
+      }
       if (!input.canPropose) throw new KnowledgeAssetError("KNOWLEDGE_ASSET_PERMISSION_DENIED", "当前回合没有提交知识修改建议的可信身份", 403);
       if (!input.isActive()) throw new KnowledgeAssetError("KNOWLEDGE_ASSET_INTERRUPTED", "回合已停止，本次建议未保存");
       const change = new KnowledgeChangeStore(input.store).submit(raw, input);

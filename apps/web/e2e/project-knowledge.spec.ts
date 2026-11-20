@@ -17,6 +17,10 @@ async function installSession(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.localStorage.clear();
     window.sessionStorage.clear();
+    // 本套回归聚焦规格库，桌面迁移引导由独立用例验证。
+    const now = new Date();
+    const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    window.localStorage.setItem(`codeflow.desktop-migration.v1:${encodeURIComponent("http://127.0.0.1:39290")}:${encodeURIComponent("chat-core-e2e-user")}`, localDate);
     window.localStorage.setItem("config", JSON.stringify({
       serverWsOrigin: "ws://127.0.0.1:39290", workspaceId: "workspace_chat_core_e2e",
       authMode: "account", accountRole: "enterprise_admin", sessionToken: "kb-e2e-session", sessionExpiresAt: Date.now() + 3_600_000,
@@ -317,19 +321,23 @@ async function installKnowledgeScenario(page: Page, options: { empty?: boolean; 
   };
 }
 
-async function openKnowledge(page: Page, threadId?: string): Promise<void> {
-  // 知识库是独立入口；需要用知识会话 ID 恢复可交互的会话上下文。
-  await page.goto(threadId ? `/knowledge?threadId=${threadId}` : "/knowledge");
+/** 阅读用例显式进入文档视图；首次进入概览由独立用例覆盖。 */
+async function openKnowledge(page: Page, threadId?: string, initialView: "assets" | "overview" = "assets"): Promise<void> {
+  await page.goto(threadId ? `/knowledge?threadId=${threadId}` : `/knowledge?view=${initialView}`);
   await expect(page.locator(".knowledge-page")).toBeVisible();
 }
 
 /** 对话面板默认收起，测试需要交互时通过公开入口展开。 */
 async function showKnowledgeAssistant(page: Page): Promise<void> {
-  // 折叠态只渲染 rail 按钮；展开态按钮仍在 DOM 中但不可见，不能盲目点击。
-  const expand = page.locator('button[aria-label="展开 AI 对话"]:visible').first();
-  // 页面过渡遮罩可能短暂拦截点击，直接派发到可见按钮。
-  if (await expand.count()) await expand.click({ force: true });
-  await expect(page.getByTestId("knowledge-assistant")).toHaveClass(/open/u);
+  const assistant = page.getByTestId("knowledge-assistant");
+  // 后台会话可能先于点击自行展开；每次重查当前状态，不点击已消失的 rail。
+  await expect(async () => {
+    if (!await assistant.isVisible()) {
+      const expand = page.locator('button[aria-label="展开 AI 对话"]:visible').first();
+      await expand.click({ timeout: 1000 });
+    }
+    await expect(assistant).toHaveClass(/open/u, { timeout: 1000 });
+  }).toPass({ timeout: 8000 });
 }
 
 /** 知识助手默认进入文件工作会话；项目讨论相关用例需要显式切回项目讨论。 */
@@ -374,8 +382,17 @@ async function installKnowledgeEngineCatalog(page: Page, deepseekAvailable = tru
 
 /** 高级和管理操作统一从顶部更多菜单进入。 */
 async function openKnowledgeMenu(page: Page, name: string): Promise<void> {
+  if (name === "待确认更新") {
+    await page.locator(".header-actions").getByRole("button", { name: /^待确认更新/u }).click();
+    return;
+  }
   await page.getByRole("button", { name: "规格库更多操作", exact: true }).click();
   await page.getByRole("menuitem", { name, exact: true }).click();
+  if (name === "高级生成" || name === "复检所选知识") {
+    const settings = page.locator(".batch-advanced");
+    await expect(settings).toBeVisible();
+    if (!await settings.evaluate(element => (element as HTMLDetailsElement).open)) await settings.locator("summary").click();
+  }
 }
 
 /** 文档复检和来源使用标题栏的统一更多入口。 */
@@ -618,13 +635,225 @@ async function useDarkTheme(page: Page): Promise<void> {
 }
 
 test.describe("项目知识库资产协作", () => {
-  test("PK-navigation 目录树统一导航，优先打开正式文档并恢复实际阅读文件", async ({ page }) => {
+  test("PK-overview 初次进入展示真实概览，显式文件深链和概览恢复各自保留", async ({ page }) => {
+    await installSession(page);
+    const scenario = await installUnifiedUpdatesScenario(page);
+    await page.goto("/knowledge");
+    const overview = page.getByTestId("knowledge-overview");
+    await expect(overview).toBeVisible();
+    await expect(overview).toContainText("现行文档");
+    await expect(overview).toContainText("规格文档复检不等于代码验收");
+    await expect(page.locator(".header-actions").getByRole("button", { name: "完善规格", exact: true })).toBeVisible();
+    await expect(page.locator(".header-actions").getByRole("button", { name: "规格对话", exact: true })).toBeVisible();
+    expect(scenario.writes).toHaveLength(0);
+    await page.goto(`/knowledge?workspaceId=${WORKSPACE_ID}&nodeId=doc-b`);
+    await expect(page.locator("div.document")).toContainText("formal-b");
+    await expect(overview).toHaveCount(0);
+    await page.getByRole("button", { name: "项目概览", exact: true }).click();
+    await expect(overview).toBeVisible();
+    await page.reload();
+    await expect(overview).toBeVisible();
+    await expect(page.locator("div.document")).toHaveCount(0);
+  });
+
+  test("PK-overview-empty 空库与只读概览提供明确操作边界", async ({ page }) => {
+    await installSession(page);
+    await installKnowledgeScenario(page, { empty: true });
+    await page.route("**/api/knowledge/assets/snapshot?**", route => route.fulfill({ json: { ok: true, data: { initialized: false, knowledgeId: null, root: "codeflow-docs/知识库", tree: { schemaVersion: 3, instructions: "", nodes: [] }, treeHash: null, canWrite: false, states: [] } } }));
+    await openKnowledge(page, undefined, "overview");
+    const overview = page.getByTestId("knowledge-overview");
+    await expect(overview).toContainText("建立项目的研发依据");
+    await expect(overview.getByRole("button", { name: /从项目完善/u })).toBeDisabled();
+    await expect(overview.getByRole("button", { name: /通过对话补充/u })).toBeDisabled();
+    await expect(page.locator(".header-actions").getByRole("button", { name: "规格对话", exact: true })).toBeDisabled();
+    await expectNoHorizontalOverflow(page.locator(".knowledge-page"));
+  });
+
+  test("PK-overview-thread 显式概览保留讨论深链，刷新后不被会话自动选正文覆盖", async ({ page }) => {
+    await installSession(page);
+    const scenario = await installKnowledgeScenario(page, { currentDocument: true, reviewState: "issues" });
+    await openKnowledge(page, scenario.threadId);
+    await expect(page.locator(".document-title")).toContainText("功能说明");
+    await page.getByRole("button", { name: "项目概览", exact: true }).click();
+    await expect(page.getByTestId("knowledge-overview")).toBeVisible();
+    await expect.poll(() => new URL(page.url()).searchParams.get("threadId")).toBe(scenario.threadId);
+    await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe("overview");
+    await page.reload();
+    await expect(page.getByTestId("knowledge-overview")).toBeVisible();
+    await expect(page.locator("div.document")).toHaveCount(0);
+    await expect(page.getByTestId("knowledge-assistant")).toHaveClass(/open/u);
+    expect(new URL(page.url()).searchParams.get("threadId")).toBe(scenario.threadId);
+  });
+
+  test("PK-overview-review 复检依据过期显示真实问题并可定位到文档", async ({ page }) => {
+    await installSession(page);
+    await installKnowledgeScenario(page, { reviewState: "stale", currentDocument: true });
+    await openKnowledge(page, undefined, "overview");
+    const overview = page.getByTestId("knowledge-overview");
+    await expect(overview).toContainText("复检依据需核对");
+    await expect(overview).toContainText("来源内容已变化");
+    await overview.getByRole("button", { name: "查看详情", exact: true }).click();
+    await expect(page.locator(".document-title")).toContainText("功能说明");
+  });
+
+  test("PK-overview-mobile 手机概览与目录导航保持内容内滚动", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installSession(page);
+    await installUnifiedUpdatesScenario(page);
+    await page.goto("/knowledge");
+    const overview = page.getByTestId("knowledge-overview");
+    await expect(overview).toBeVisible();
+    await expectNoHorizontalOverflow(page.locator(".knowledge-page"));
+    await expect(overview).toHaveCSS("overflow", "auto");
+    await page.getByRole("button", { name: "规格库目录", exact: true }).click();
+    const tree = page.getByTestId("knowledge-tree");
+    await expect(tree).toBeVisible();
+    await tree.getByRole("button", { name: "规格约束", exact: true }).click();
+    await expect(tree).toBeHidden();
+    await expect(page.locator("div.document")).toContainText("formal-a");
+    await page.getByRole("button", { name: "规格库目录", exact: true }).click();
+    await tree.getByRole("button", { name: "项目概览", exact: true }).click();
+    await expect(overview).toBeVisible();
+    await expectNoHorizontalOverflow(page.locator(".knowledge-page"));
+  });
+
+  test("PK-change-recheck 过期建议携带原文回规格对话，不直接覆盖正式文档", async ({ page }) => {
+    await installSession(page);
+    const scenario = await installUnifiedUpdatesScenario(page, { proposal: true });
+    Object.assign(scenario.proposal, { stale: true, staleReasons: ["正式正文已更新"] });
+    await page.evaluate(workspaceId => localStorage.setItem(`codeflow:knowledge-build-prefs:${workspaceId}`, JSON.stringify({ engine: "codex", model: "gpt-test", effort: "high" })), WORKSPACE_ID);
+    await page.goto(`/knowledge?workspaceId=${WORKSPACE_ID}&changeId=proposal-a&view=approvals`);
+    const inbox = page.getByTestId("knowledge-change-inbox");
+    await expect(inbox).toContainText("正式正文已更新");
+    await inbox.getByRole("button", { name: "对照最新正文重新整理", exact: true }).click();
+    const input = page.getByTestId("knowledge-assistant").locator(".composer__textarea");
+    await expect(input).toHaveValue(/原提案：proposal-a/u);
+    await expect(input).toHaveValue(/会话建议正文/u);
+    expect(scenario.approvals).toHaveLength(0);
+    expect(scenario.writes).toHaveLength(0);
+    expect(scenario.calls.sends).toHaveLength(0);
+  });
+
+  test("PK-change-history 已处理建议可以从记录入口查看确切决策", async ({ page }) => {
+    await installSession(page);
+    const scenario = await installUnifiedUpdatesScenario(page, { proposal: true });
+    const reviewed = { ...scenario.proposal, status: "rejected", reviewedAt: "2026-11-19T08:00:00Z", reviewedBy: "reviewer", reviewNote: "保留现行要求，不采用此建议" };
+    await page.route("**/api/knowledge/assets/changes?**", route => {
+      const status = new URL(route.request().url()).searchParams.get("status");
+      return route.fulfill({ json: { ok: true, data: { items: status === "all" || status === "rejected" ? [reviewed] : [], nextOffset: null, pendingNodes: [] } } });
+    });
+    await page.route("**/api/knowledge/assets/change?**", route => route.fulfill({ json: { ok: true, data: reviewed } }));
+    await openKnowledge(page, undefined, "overview");
+    await openKnowledgeMenu(page, "修改建议记录");
+    const history = page.locator(".ant-drawer-content:visible").filter({ has: page.getByText("修改建议记录", { exact: true }) });
+    await history.getByRole("combobox", { name: "筛选审批状态", exact: true }).selectOption("rejected");
+    await expect(history).toContainText("保留现行要求，不采用此建议");
+    await expect(history).toContainText("已拒绝");
+    await expect(history.getByRole("button", { name: "批准并采用", exact: true })).toHaveCount(0);
+    expect(scenario.approvals).toHaveLength(0);
+  });
+
+  test("PK-overview-pending-cache 显式概览不恢复旧待确认目标", async ({ page }) => {
+    await installSession(page);
+    await installUnifiedUpdatesScenario(page, { proposal: true });
+    await page.goto(`/knowledge?workspaceId=${WORKSPACE_ID}&changeId=proposal-a&view=approvals`);
+    await expect(page.getByTestId("knowledge-change-inbox")).toContainText("会话建议正文");
+    await expect.poll(() => page.evaluate(workspaceId => {
+      const state = JSON.parse(sessionStorage.getItem(`knowledge-page-state:v2:${encodeURIComponent(workspaceId)}`) || "null");
+      return Boolean(state?.updatesTarget);
+    }, WORKSPACE_ID)).toBe(true);
+    await page.goto(`/knowledge?workspaceId=${WORKSPACE_ID}&view=overview`);
+    await expect(page.getByTestId("knowledge-overview")).toBeVisible();
+    await expect(page.getByTestId("knowledge-updates")).toHaveCount(0);
+    await expect(page.getByTestId("knowledge-change-inbox")).toHaveCount(0);
+  });
+
+  test("PK-change-recheck-workspace 等待重新整理期间切换工作区不污染新会话", async ({ page }) => {
+    await installSession(page);
+    const scenario = await installUnifiedUpdatesScenario(page, { proposal: true });
+    Object.assign(scenario.proposal, { stale: true, staleReasons: ["正式正文已更新"] });
+    await page.evaluate(workspaceId => localStorage.setItem(`codeflow:knowledge-build-prefs:${workspaceId}`, JSON.stringify({ engine: "codex", model: "gpt-test", effort: "high" })), WORKSPACE_ID);
+    const nextWorkspace = "workspace-recheck-next";
+    const created = await page.request.post(`${MOCK_URL}/api/threads/create`, { data: { workspaceId: nextWorkspace, title: "新工作区规格会话", engine: "codex" } });
+    const { threadId: nextThreadId } = await created.json() as { threadId: string };
+    const nextConversation = { threadId: nextThreadId, nodeId: null, createdByUserId: "chat-core-e2e-user", title: "新工作区规格会话", engine: "codex", model: "gpt-test", effort: "high", active: true, createdAt: Date.now(), updatedAt: Date.now() };
+    await page.route("**/api/threads/load", async route => {
+      if (route.request().postDataJSON().threadId !== nextThreadId) return route.fallback();
+      const response = await page.request.post(`${MOCK_URL}/api/threads/load`, { data: { workspaceId: nextWorkspace, threadId: nextThreadId } });
+      return route.fulfill({ json: await response.json() });
+    });
+    await page.route("**/api/workspaces?**", route => route.fulfill({ json: { ok: true, workspaces: [
+      { id: WORKSPACE_ID, title: "原规格项目", path: "D:/e2e-workspace", kind: "local", createdAt: 1, updatedAt: 1 },
+      { id: nextWorkspace, title: "新的规格项目", path: "D:/next-knowledge", kind: "local", createdAt: 1, updatedAt: 1 },
+    ], workspaceListAuthoritative: true } }));
+    await page.route("**/api/knowledge/assets/**", route => {
+      const url = new URL(route.request().url());
+      const body = route.request().postDataJSON() as RequestBody | null;
+      if ((url.searchParams.get("workspaceId") ?? body?.workspaceId) !== nextWorkspace) return route.fallback();
+      const action = url.pathname.split("/").at(-1);
+      const data = action === "snapshot" ? { initialized: true, canWrite: true, treeHash: null, states: [], tree: { schemaVersion: 3, instructions: "", nodes: [] } }
+        : action === "changes" ? { items: [], pendingNodes: [], nextOffset: null }
+        : action === "conversation.list" ? [nextConversation] : action === "conversation.connect" ? nextConversation : [];
+      return route.fulfill({ json: { ok: true, data } });
+    });
+    let release!: () => void, waiting = false, returned = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await page.route("**/api/knowledge/assets/conversation.create", async route => {
+      waiting = true;
+      await gate;
+      await route.fallback();
+      returned = true;
+    });
+    await page.goto(`/knowledge?workspaceId=${WORKSPACE_ID}&changeId=proposal-a&view=approvals`);
+    await expect(page.getByTestId("knowledge-change-inbox").getByRole("button", { name: "对照最新正文重新整理", exact: true })).toBeVisible();
+    // 调用已挂载组件的真实处理函数，保留其 Promise，以便精确等待 A 的迟到处理结束。
+    await page.evaluate(proposal => {
+      let component = (document.querySelector(".knowledge-page") as any).__vueParentComponent;
+      while (component && !component.setupState?.recheckKnowledgeChange) component = component.parent;
+      if (!component) throw new Error("找不到规格页组件状态");
+      (window as any).__pendingKnowledgeRecheck = component.setupState.recheckKnowledgeChange(proposal);
+    }, scenario.proposal);
+    await expect.poll(() => waiting).toBe(true);
+    await page.locator(".ws-compact-trigger").click();
+    await page.locator(".ws-compact-option").filter({ hasText: "新的规格项目" }).click();
+    await expect(page.getByLabel("规格库所属项目", { exact: true })).toHaveText("新的规格项目");
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "项目概览", exact: true }).click();
+    // 在真实组件内设置连接已完成的边界状态，避免把 B 的引擎回放夹具混入跨工作区隔离断言。
+    const before = await page.evaluate(({ nextWorkspace, nextThreadId, nextConversation }) => {
+      let component = (document.querySelector(".knowledge-page") as any).__vueParentComponent;
+      while (component && !component.setupState?.recheckKnowledgeChange) component = component.parent;
+      if (!component) throw new Error("找不到规格页组件状态");
+      const state = component.setupState;
+      if (state.workspaceId !== nextWorkspace) throw new Error("工作区切换尚未完成");
+      state.conversations = [nextConversation];
+      state.assistantThreadId = nextThreadId;
+      state.boundNodeId = null;
+      state.bindingReady = true;
+      state.bindingError = null;
+      state.assistantOpen = false;
+      return state.composer.externalActionTick as number;
+    }, { nextWorkspace, nextThreadId, nextConversation });
+    release();
+    await expect.poll(() => returned).toBe(true);
+    await page.evaluate(async () => { await (window as any).__pendingKnowledgeRecheck; delete (window as any).__pendingKnowledgeRecheck; });
+    await expect.poll(() => page.evaluate(() => {
+      let component = (document.querySelector(".knowledge-page") as any).__vueParentComponent;
+      while (component && !component.setupState?.recheckKnowledgeChange) component = component.parent;
+      if (!component) throw new Error("找不到规格页组件状态");
+      return { tick: component.setupState.composer.externalActionTick, error: component.setupState.bindingError };
+    })).toEqual({ tick: before, error: null });
+    expect(scenario.calls.sends).toHaveLength(0);
+  });
+
+  test("PK-navigation 目录树统一导航，选择目录后优先打开正式文档并恢复实际阅读文件", async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 920 });
     await installSession(page);
     const scenario = await installUnifiedUpdatesScenario(page);
     scenario.current.delete("doc-a");
-    await openKnowledge(page);
+    await openKnowledge(page, undefined, "overview");
     const tree = page.getByTestId("knowledge-tree"), main = page.locator(".knowledge-page main");
+    await expect(page.getByTestId("knowledge-overview")).toBeVisible();
+    await tree.getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(page.locator("div.document")).toContainText("formal-b");
     await expect(tree.locator(".asset-tree-row.selected")).toContainText("编码规范");
     await expect(page.locator(".document-title h2")).toHaveText("规格约束 / 编码规范");
@@ -660,6 +889,7 @@ test.describe("项目知识库资产协作", () => {
     const scenario = await installUnifiedUpdatesScenario(page, { multiple: true });
     scenario.current.clear();
     await openKnowledge(page);
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true }).click();
     const updates = page.getByTestId("knowledge-updates");
     await expect(updates.locator(".update-row")).toHaveCount(2);
     await expect(updates.getByRole("button", { name: "采用此版本", exact: true })).toBeDisabled();
@@ -673,6 +903,7 @@ test.describe("项目知识库资产协作", () => {
     await installSession(page);
     const scenario = await installUnifiedUpdatesScenario(page);
     await openKnowledge(page);
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(page.locator("div.document")).toContainText("formal-a");
     const tree = page.getByTestId("knowledge-tree");
     await tree.getByRole("button", { name: "规格约束目录操作", exact: true }).click();
@@ -693,6 +924,7 @@ test.describe("项目知识库资产协作", () => {
     scenario.current.set("doc-c", "formal-c");
     await openKnowledge(page);
     const tree = page.getByTestId("knowledge-tree"), viewport = tree.getByRole("tree");
+    await tree.getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(tree.locator(".asset-tree-row.selected")).toContainText("项目约定");
     await tree.getByRole("button", { name: "系统架构", exact: true }).click();
     await expect(tree.locator(".asset-tree-row.selected")).toContainText("架构总览");
@@ -739,7 +971,7 @@ test.describe("项目知识库资产协作", () => {
     expect(new URL(page.url()).searchParams.has("executionThreadId")).toBe(false);
   });
 
-  test("PK-navigation-states-error 状态补齐失败停止加载，显式重试后打开默认正文", async ({ page }) => {
+  test("PK-navigation-states-error 状态补齐失败停止加载，显式重试后保留概览并可选择正文", async ({ page }) => {
     await installSession(page);
     const scenario = await installUnifiedUpdatesScenario(page);
     let fail = true;
@@ -748,7 +980,7 @@ test.describe("项目知识库资产协作", () => {
         ? route.fulfill({ status: 500, json: { ok: false, code: "E2E_STATES_FAILED", message: "模拟状态补齐失败", details: { requestId: "states-error-test" } } }) : route.fallback();
       return route.fulfill({ json: { ok: true, data: { initialized: true, knowledgeId: "unified", root: "codeflow-docs/知识库", tree: { schemaVersion: 3, instructions: "", nodes: scenario.nodes }, treeHash: "a".repeat(64), canWrite: true, states: [] } } });
     });
-    await openKnowledge(page);
+    await openKnowledge(page, undefined, "overview");
     const main = page.locator(".knowledge-page main");
     await expect(main.getByRole("alert")).toContainText("模拟状态补齐失败");
     await expect(main.getByRole("alert")).toContainText("states-error-test");
@@ -756,6 +988,8 @@ test.describe("项目知识库资产协作", () => {
     await expect(page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true })).toBeVisible();
     fail = false;
     await main.getByRole("button", { name: "重新读取状态", exact: true }).click();
+    await expect(page.getByTestId("knowledge-overview")).toBeVisible();
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(page.locator("div.document")).toContainText("formal-a");
     await expect(main.getByRole("alert")).toHaveCount(0);
     await expect(page.getByTestId("knowledge-tree").getByLabel("规格库统计")).toContainText("已有 2");
@@ -770,6 +1004,7 @@ test.describe("项目知识库资产协作", () => {
       return route.fulfill({ status: 500, json: { ok: false, code: "E2E_STATES_FAILED", message: "模拟状态刷新失败" } });
     });
     await openKnowledge(page);
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(page.locator("div.document")).toContainText("formal-a");
     const retry = page.getByTestId("knowledge-tree").getByRole("button", { name: "状态读取失败，重试", exact: true });
     await expect(retry).toBeVisible();
@@ -800,6 +1035,7 @@ test.describe("项目知识库资产协作", () => {
     });
     await openKnowledge(page);
     const tree = page.getByTestId("knowledge-tree");
+    await expandKnowledgeDirectory(page, "规格约束");
     await tree.getByRole("button", { name: "项目约定", exact: true }).click();
     await expect(page.locator("div.document")).toContainText("manual-current");
     await showKnowledgeAssistant(page);
@@ -943,14 +1179,15 @@ test.describe("项目知识库资产协作", () => {
     release();
     await expect(updates).toHaveCount(0);
     await expect(page.locator("div.document")).toContainText("关键机制正文");
-    await expect(page.locator(".document-title")).toContainText("已入库启用");
+    await expect(page.locator(".document-title")).toContainText("已确认采用");
     await expect(assistant).toContainText("知识工作会话 · 关键机制");
     await expect(assistant.locator(".composer__textarea")).toHaveValue("采用后继续完善这份文档");
     await expect(assistant.locator(".composer__textarea")).toBeEnabled();
     await page.reload();
     await expect(updates).toHaveCount(0);
     await expect(page.locator("div.document")).toContainText("关键机制正文");
-    await assistant.getByRole("button", { name: "文件会话", exact: true }).click();
+    const fileConversationSwitch = assistant.getByRole("button", { name: "文件会话", exact: true });
+    if (await fileConversationSwitch.isVisible()) await fileConversationSwitch.click();
     await expect(assistant).toContainText("知识工作会话 · 关键机制");
     expect(scenario.applies).toHaveLength(1);
   });
@@ -1384,6 +1621,7 @@ test.describe("项目知识库资产协作", () => {
     scenario.current.clear();
     scenario.runs[0]!.phase = "partial";
     await openKnowledge(page);
+    await page.getByTestId("knowledge-tree").getByRole("button", { name: "规格约束", exact: true }).click();
     await expect(page.locator(".revision-diff")).toBeVisible();
     await expect(page.locator(".updates-summary")).toHaveCount(0);
     const tree = page.getByTestId("knowledge-tree");
@@ -2405,7 +2643,7 @@ test.describe("项目知识库资产协作", () => {
     await expect(policy).toContainText("空文档不作为已生效规则加载");
     await expectNoHorizontalOverflow(policy);
     await policy.getByRole("button", { name: "Close", exact: true }).click();
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await expect(modal).toContainText("导入后直接引用原文，按章节检索");
     await expect(modal.getByRole("radio", { name: "产品文档", exact: true })).toBeChecked();
@@ -2429,7 +2667,7 @@ test.describe("项目知识库资产协作", () => {
     const files = Array.from({ length: 18 }, (_, index) => ({ path: `docs/长期维护文档-${index}.md`, title: `长期维护文档 ${index}`, contentHash: "b".repeat(64) }));
     await page.route("**/api/knowledge/assets/imports?**", route => route.fulfill({ json: { ok: true, data: { files, directories: ["apps", "codeflow-docs", "包含很长名称的项目资料目录"], nextOffset: null } } }));
     await openKnowledge(page);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await modal.getByRole("radio", { name: "规格约束", exact: true }).check();
     await expect(modal).toContainText("导入后作为所选范围的规格规则生效");
@@ -2464,7 +2702,7 @@ test.describe("项目知识库资产协作", () => {
       await route.fulfill({ json: { ok: true, data: { files: populated ? [{ title: "文档", path: "docs/readme.md", contentHash: "b".repeat(64) }] : [], directories: [], nextOffset: null } } });
     });
     await openKnowledge(page);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     const browser = modal.locator(".import-scroll");
     await expect(modal.locator(".ant-empty")).toBeVisible();
@@ -2491,7 +2729,7 @@ test.describe("项目知识库资产协作", () => {
       return route.fulfill({ status: 500, json: { ok: false, code: "E2E_LIST_FAILED", message: "模拟来源刷新失败" } });
     });
     await openKnowledge(page);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     const upload = modal.locator("button").filter({ hasText: "上传本地文档" });
     await expect(upload).toBeEnabled();
@@ -3135,7 +3373,7 @@ test.describe("项目知识库资产协作", () => {
     await page.reload();
     await expect(page.getByLabel("规格库所属项目", { exact: true })).toHaveText("新知识项目");
     expect(new URL(page.url()).searchParams.get("workspaceId")).toBe(nextWorkspace);
-    await page.getByRole("button", { name: "展开 AI 对话", exact: true }).click();
+    await showKnowledgeAssistant(page);
     await expect(page.getByTestId("knowledge-assistant").locator(".composer__textarea")).toHaveCount(0);
     expect(scenario.calls.creates).toHaveLength(0);
   });
@@ -3211,7 +3449,7 @@ test.describe("项目知识库资产协作", () => {
     await expect(preview.getByRole("img", { name: "架构图", exact: true })).toHaveAttribute("src", /^data:image\/png;base64,/);
     await preview.getByRole("button", { name: "打开原文", exact: true }).click();
     await expect(page.locator(".preview-window__filepath")).toHaveText("docs/guide.md");
-    await page.locator(".ant-modal:visible").filter({ has: page.locator(".preview-window") }).locator(".ant-modal-close").click();
+    await page.getByRole("button", { name: "关闭预览", exact: true }).click();
     await preview.getByRole("link", { name: "阅读补充", exact: true }).click();
     await expect(page.locator(".preview-window__filepath")).toHaveText("docs/more.md");
     expect(files).toContain("docs/guide.md");
@@ -3759,7 +3997,7 @@ test.describe("项目知识库资产协作", () => {
     await installSession(page);
     const scenario = await installKnowledgeScenario(page);
     await openKnowledge(page, scenario.threadId);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await expect(modal).toBeVisible();
     await expect(modal.getByRole("textbox", { name: "导入来源目录" })).toHaveValue("");
@@ -3778,7 +4016,7 @@ test.describe("项目知识库资产协作", () => {
     await installSession(page);
     const scenario = await installKnowledgeScenario(page);
     await openKnowledge(page, scenario.threadId);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await modal.getByRole("textbox", { name: "导入来源目录" }).fill("codeflow-docs");
     await modal.getByRole("button", { name: "读取目录", exact: true }).click();
@@ -3806,7 +4044,7 @@ test.describe("项目知识库资产协作", () => {
         : { ok: true, data: { files: [], directories: [], nextOffset: null } }),
     }));
     await openKnowledge(page, scenario.threadId);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await expect(modal.locator(".ant-empty")).toBeVisible();
     await expect(modal.getByRole("alert")).toHaveCount(0);
@@ -3839,7 +4077,7 @@ test.describe("项目知识库资产协作", () => {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, data: snapshot() }) });
     });
     await openKnowledge(page, scenario.threadId);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await expect(modal.locator(".import-destination")).toContainText("产品文档");
     await expect(modal.locator(".import-description")).not.toContainText("customer-docs/知识库");
@@ -3961,7 +4199,7 @@ test.describe("项目知识库资产协作", () => {
     await installSession(page);
     const scenario = await installKnowledgeScenario(page, { paginatedImports: true });
     await openKnowledge(page, scenario.threadId);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await modal.getByRole("button", { name: "docs/", exact: true }).click();
     await modal.getByRole("checkbox", { name: /设计说明/ }).check();
@@ -3997,7 +4235,7 @@ test.describe("项目知识库资产协作", () => {
       if (new URL(route.request().url()).searchParams.get("workspaceId") !== nextWorkspace) return route.fallback();
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, data: { initialized: true, knowledgeId: "next-kb", root: "codeflow-docs/知识库", canWrite: true, treeHash: null, states: [], tree: { schemaVersion: 1, instructions: "", nodes: [] } } }) });
     });
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     const modal = page.getByRole("dialog", { name: "选择项目文档导入" });
     await modal.getByRole("button", { name: "docs/", exact: true }).click();
     await modal.getByRole("checkbox", { name: /设计说明/ }).check();
@@ -4019,7 +4257,7 @@ test.describe("项目知识库资产协作", () => {
     await expect(page.getByText("不应出现在新工作区", { exact: true })).toHaveCount(0);
     expect(imports).toHaveLength(1);
     expect(imports[0].workspaceId).toBe(WORKSPACE_ID);
-    await page.getByRole("button", { name: "导入文档", exact: true }).click();
+    await openKnowledgeMenu(page, "导入文档");
     await expect(modal.getByRole("textbox", { name: "导入来源目录" })).toHaveValue("");
     await expect(modal.getByRole("button", { name: "docs/", exact: true })).toBeVisible();
     await expect(modal.getByRole("alert")).toHaveCount(0);
@@ -4700,7 +4938,7 @@ test.describe("项目知识库资产协作", () => {
         await expectNoHorizontalOverflow(assistant);
         await expectNoHorizontalOverflow(page.locator(".knowledge-page"));
         await expectNoHorizontalOverflow(page.locator(".page-header"));
-        await expectInside(page.locator(".page-header").getByRole("button", { name: "导入文档", exact: true }), page.locator(".page-header"));
+        await expectInside(page.locator(".page-header").getByRole("button", { name: "完善规格", exact: true }), page.locator(".page-header"));
         if (size.width > 1100) await expectInside(page.getByTestId("tree-batch-actions").getByRole("button", { name: "一键生成", exact: true }), page.getByTestId("knowledge-tree"));
         await expectNoHorizontalOverflow(assistant.locator(".assistant-head"));
         await expectInside(assistant.getByRole("button", { name: "收起", exact: true }), assistant.locator(".assistant-head"));
@@ -5199,6 +5437,7 @@ test.describe("项目知识库资产协作", () => {
     await report.getByRole("button", { name: "按报告问题生成修订版", exact: true }).click();
     const modal = page.getByRole("dialog", { name: "根据报告生成修订版", exact: true });
     await expect(modal).toContainText("保留现有版本");
+    await modal.locator(".batch-advanced > summary").click();
     await expect(modal.getByRole("switch", { name: "生成后复检", exact: true })).toBeChecked();
     await modal.getByRole("button", { name: "开始生成修订版", exact: true }).click();
     await expect.poll(() => scenario.calls.starts.length).toBe(1);
@@ -5227,6 +5466,10 @@ test.describe("项目知识库资产协作", () => {
       await openKnowledge(page, scenario.threadId);
       await page.getByTestId("knowledge-tree").getByRole("button", { name: "功能说明", exact: true }).click();
       await page.setViewportSize({ width, height: 900 });
+      if (width < 1100) {
+        const backdrop = page.getByRole("button", { name: "关闭侧面板", exact: true });
+        if (await backdrop.isVisible()) await backdrop.click();
+      }
       await openDocumentMenu(page, "复检报告");
       const report = page.getByTestId("knowledge-review-report"), issues = report.getByRole("list", { name: "复检问题条目" }).getByRole("article");
       await expect(report.locator(".review-counts")).toHaveText("共 3 项问题：2 项需修复 · 1 项提醒");
@@ -5294,7 +5537,7 @@ test.describe("项目知识库资产协作", () => {
     await page.getByRole("button", { name: "仍然采用", exact: true }).click();
     await expect.poll(() => scenario.calls.adopts.length).toBe(1);
     await page.getByRole("button", { name: "返回文档", exact: true }).click();
-    await expect(page.locator(".document-title")).toContainText("已入库启用");
+    await expect(page.locator(".document-title")).toContainText("已确认采用");
     await expect(page.locator("div.document")).toContainText("错误日志规范");
     await openDocumentMenu(page, "复检报告");
     await expect(report).toContainText("复检已失效");

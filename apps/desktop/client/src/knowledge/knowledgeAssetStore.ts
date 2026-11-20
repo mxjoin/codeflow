@@ -469,7 +469,7 @@ export class KnowledgeAssetStore {
     return this.ancestry(id, tree)[0]?.category;
   }
   /** 仅读取正式树中已采用规格，排除默认投影和未发布的准备指针；局部规则按路径匹配。 */
-  rules(paths: string[] = []): { rules: Array<{ nodeId: string; title: string; appliesTo: string[]; content: string; path: string; contentHash: string }>; scoped: Array<{ nodeId: string; title: string; appliesTo: string[] }> } {
+  rules(paths: string[] = []): import("@codeflowai/shared").KnowledgeSpecificationRules {
     const requested = paths.map(knowledgeRelativePath);
     const tree = this.readTree(false).tree;
     const rules: ReturnType<KnowledgeAssetStore["rules"]>["rules"] = [], scoped: ReturnType<KnowledgeAssetStore["rules"]>["scoped"] = [];
@@ -482,15 +482,15 @@ export class KnowledgeAssetStore {
       if (appliesTo.length && !requested.some(file => appliesTo.some(scope => file === scope || file.startsWith(`${scope}/`) || scope.startsWith(`${file}/`)))) continue;
       if (node.contentMode === "reference") {
         const reference = this.readReference(node.id, tree);
-        rules.push({ nodeId: node.id, title: node.title, appliesTo, content: reference.content, path: reference.path, contentHash: reference.contentHash });
+        rules.push({ nodeId: node.id, title: node.title, appliesTo, content: reference.content, path: reference.path, contentHash: reference.contentHash, revisionId: null });
       } else {
         const document = this.readRevision(node.id, pointer!.revisionId);
         if (knowledgeHash(this.assetBytes(`${this.revisionRoot(node.id, pointer!.revisionId)}/revision.json`)) !== pointer!.revisionHash) throw new KnowledgeAssetError("KNOWLEDGE_ASSET_CONFLICT", "当前知识版本元数据被外部修改，请检查合并结果");
-        rules.push({ nodeId: node.id, title: node.title, appliesTo, content: document.content, path: document.path, contentHash: document.revision.contentHash });
+        rules.push({ nodeId: node.id, title: node.title, appliesTo, content: document.content, path: document.path, contentHash: document.revision.contentHash, revisionId: document.revision.id });
       }
     }
     if (rules.reduce((total, rule) => total + rule.content.length, 0) > 24000) throw new KnowledgeAssetError("KNOWLEDGE_ASSET_INPUT_INVALID", "本次适用规格超过 24000 字符，请精简全局规则或缩小适用范围", 400);
-    return { rules, scoped };
+    return { rules, scoped, ...(requested.length ? { paths: requested } : {}) };
   }
   scope(id: string | null, tree = this.readTree().tree): KnowledgeAssetNode[] {
     const byId = new Map(tree.nodes.map(node => [node.id, node]));
@@ -659,7 +659,7 @@ export class KnowledgeAssetStore {
     return { node, current, sourceRevision, currentHash, drafts: this.pendingRevisions(revisions.filter(r => r.id !== pointer?.revisionId && r.baseHash === currentHash)), effectiveInstructions: this.effectiveInstructions(nodeId, tree), freshness };
   }
 
-  /** 保存完整版本；正式采用默认文档先发布节点，导入失败仅清理本次新资产。 */
+  /** 保存完整版本；人工无变化保存复用正式版本，先校验基线，保留既有来源和生成要求。 */
   saveDocument(input: {
     nodeId: string; content: string; sources: unknown; expectedHash: string | null;
     origin: KnowledgeAssetRevision["origin"]; instructions?: string; userInstructions?: string; summary?: string; runId?: string | null;
@@ -692,10 +692,18 @@ export class KnowledgeAssetStore {
       const baseRevisionId = this.pointer(node.id)?.revisionId ?? null;
       const sources = this.parseSources(input.sources, true);
       const sourceBody = knowledgeJson(sources);
+      const previous = input.origin === "manual" && baseRevisionId ? this.readRevision(node.id, baseRevisionId) : null;
+      const instructions = knowledgeText(input.instructions ?? previous?.revision.instructions ?? "", 100_000);
+      const userInstructions = input.userInstructions ?? previous?.revision.userInstructions;
+      if (previous && input.adopt === true && !this.candidate && !input.newNode && !input.beforeSave && !input.afterSave && !input.runId
+        && previous.content === content && knowledgeJson(previous.sources) === sourceBody
+        && previous.revision.instructions === instructions && previous.revision.userInstructions === userInstructions) {
+        return previous.revision;
+      }
       const revision: KnowledgeAssetRevision = {
         schemaVersion: 1, id: `rev_${crypto.randomUUID()}`, nodeId: node.id, createdAt: new Date().toISOString(),
-        origin: input.origin, instructions: knowledgeText(input.instructions ?? "", 100_000), summary: knowledgeText(input.summary ?? "", 4000),
-        ...(input.userInstructions === undefined ? {} : { userInstructions: knowledgeText(input.userInstructions, 100_000) }),
+        origin: input.origin, instructions, summary: knowledgeText(input.summary ?? "", 4000),
+        ...(userInstructions === undefined ? {} : { userInstructions: knowledgeText(userInstructions, 100_000) }),
         baseHash, baseRevisionId, contentHash: knowledgeHash(content), sourcesHash: knowledgeHash(sourceBody), runId: input.runId ? knowledgeId(input.runId) : null,
       };
       const root = this.revisionRoot(node.id, revision.id);

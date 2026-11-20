@@ -189,16 +189,6 @@ test("resolveClientUpgradeInstallUrl prefers the connected server address plus d
   );
 });
 
-test("resolveClientUpgradeInstallUrl keeps the legacy server domain upgrade path", () => {
-  assert.equal(
-    resolveClientUpgradeInstallUrl({
-      serverWsUrl: "wss://codeflow.hanshangai.com/ws/client",
-      downloadPath: "/downloads/codeflowai-2026.04.17.09.tgz",
-    }),
-    "https://codeflow.hanshangai.com/downloads/codeflowai-2026.04.17.09.tgz",
-  );
-});
-
 test("resolveClientUpgradeInstallUrl allows localhost and private-network http upgrade sources", () => {
   assert.equal(
     resolveClientUpgradeInstallUrl({

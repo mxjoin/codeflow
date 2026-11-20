@@ -54,7 +54,7 @@ async function fixture(t: test.TestContext, fault: IdentityFault, boundary: Boun
     createdAt: "2026-10-24T00:00:00.000Z", expiresAt: "2099-10-24T00:00:00.000Z" }, keys.privateKey);
   const routes: string[] = [], receipts: DesktopUpdateReceipt[] = [], failures: unknown[] = [];
   const handlers = new Set<Promise<void>>();
-  let registrations = 0, injected = false;
+  let operationRegistrations = 0, injected = false;
   /** 故障只发生一次；恢复由测试显式写回原字节，不调用身份创建入口。 */
   const changeIdentity = async (): Promise<void> => {
     assert.equal(injected, false); injected = true;
@@ -72,8 +72,9 @@ async function fixture(t: test.TestContext, fault: IdentityFault, boundary: Boun
       method: request.method!, url: request.url!, body: bytes }), metadata.signature);
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/software/desktop/devices/register") {
-      registrations++;
-      if (!injected && boundary === "before-receipt" && registrations === 2) await changeIdentity();
+      // 设备心跳与业务登记共用接口；只按非心跳登记计数，避免后台心跳改变注入时点。
+      if (!String(metadata.requestId).startsWith("device-presence:")) operationRegistrations++;
+      if (!injected && boundary === "before-receipt" && operationRegistrations === 2) await changeIdentity();
       response.end(JSON.stringify({ ok: true, deviceId: identity.deviceId, publicKeySha256: desktopDevicePublicKeySha256(identity.publicKeyBase64) }));
     } else if (request.url === "/api/software/desktop/release") response.end(JSON.stringify(manifest));
     else if (request.url === "/api/software/desktop/releases/identity-release/archive") {
@@ -140,8 +141,9 @@ for (const boundary of ["before-register", "before-receipt"] as const) {
         } else assert.equal(identityFailure.message, fault === "missing" ? "DESKTOP_DEVICE_IDENTITY_MISSING" : "DESKTOP_DEVICE_IDENTITY_CHANGED");
         return true;
       });
-      assert.deepEqual(f.routes, ["/api/software/desktop/devices/register", "/api/software/desktop/release",
-        "/api/software/desktop/releases/identity-release/archive", ...(boundary === "before-receipt" ? ["/api/software/desktop/devices/register"] : [])]);
+      assert.deepEqual(f.routes.filter(route => route !== "/api/software/desktop/devices/register"),
+        ["/api/software/desktop/release", "/api/software/desktop/releases/identity-release/archive"]);
+      assert.ok(f.routes.some(route => route === "/api/software/desktop/devices/register"));
       assert.deepEqual(f.receipts, []);
       if (fault === "missing") await assert.rejects(() => fs.access(f.identityPath), { code: "ENOENT" });
       else assert.ok((await fs.readFile(f.identityPath)).equals(f.changedIdentity!), "failed signing must preserve the altered identity bytes");
@@ -168,7 +170,9 @@ for (const boundary of ["before-register", "before-receipt"] as const) {
       await fs.writeFile(f.identityPath, f.originalIdentity);
       const requestsBeforeRecovery = f.routes.length;
       await f.app.flushReceipts();
-      assert.deepEqual(f.routes.slice(requestsBeforeRecovery), ["/api/software/desktop/devices/register", "/api/software/desktop/update-receipts"]);
+      assert.deepEqual(f.routes.slice(requestsBeforeRecovery).filter(route => route !== "/api/software/desktop/devices/register"),
+        ["/api/software/desktop/update-receipts"]);
+      assert.ok(f.routes.slice(requestsBeforeRecovery).some(route => route === "/api/software/desktop/devices/register"));
       assert.deepEqual(f.receipts, [receipt]);
       const reopened = createUpdateReceiptJournal(f.dataDir);
       assert.deepEqual(await reopened.pending(f.identity.deviceId), []);

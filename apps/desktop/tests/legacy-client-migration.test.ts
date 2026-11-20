@@ -123,7 +123,7 @@ test("只读发现等待明确选择，稍后不会执行迁移", async t => {
   assert.deepEqual(calls, ["discover"]);
 });
 
-test("旧账号检测失败可明确暂缓，本次不迁移不恢复账号，旧文件保持不变且下次重新检测", async t => {
+test("旧账号Server不可达时自动保留旧文件并放行新桌面，不恢复账号且下次重新检测", async t => {
   const calls: string[] = [];
   const f = await fixture(t, async request => {
     calls.push(request.action);
@@ -141,13 +141,14 @@ test("旧账号检测失败可明确暂缓，本次不迁移不恢复账号，�
   const waiting = owner.prepare().then(() => { released = true; });
   await owner.whenDiscovered();
   t.after(async () => { await owner.stop(); await waiting; });
-  assert.equal(owner.snapshot().status, "failed");
-  assert.equal(owner.snapshot().canDefer, true);
-  assert.equal(released, false);
-  await owner.defer(); await waiting; await owner.runtimeReady();
-  assert.equal(owner.snapshot().status, "ready");
-  assert.equal(owner.snapshot().errorCode, null);
+  assert.equal(owner.snapshot().status, "running");
   assert.equal(owner.snapshot().canDefer, false);
+  assert.equal(owner.snapshot().message, "旧 Client 所属 Server 暂不可用，旧数据已保留；未迁移旧数据，新桌面将继续启动。");
+  await waiting; assert.equal(released, true);
+  await owner.runtimeReady();
+  assert.equal(owner.snapshot().status, "ready");
+  assert.equal(owner.snapshot().errorCode, "SOURCE_ACCOUNT_UNRESOLVED");
+  assert.ok(owner.snapshot().message);
   assert.equal(await owner.takeAccount(), null);
   assert.equal(restores, 0);
   assert.deepEqual(calls, ["discover"]);
@@ -157,12 +158,13 @@ test("旧账号检测失败可明确暂缓，本次不迁移不恢复账号，�
     await assert.rejects(fs.stat(path.join(f.dataDir, name)), { code: "ENOENT" });
   await assert.rejects(owner.defer(), /MIGRATION_DECISION_INVALID/u);
   const reopened = createLegacyClientMigration(f);
-  const next = assert.rejects(reopened.prepare(), /MIGRATION_STOPPED/u);
+  const next = reopened.prepare();
   await reopened.whenDiscovered();
-  assert.equal(reopened.snapshot().canDefer, true);
+  assert.equal(reopened.snapshot().status, "running");
+  assert.ok(reopened.snapshot().message);
+  await next; await reopened.runtimeReady();
   assert.deepEqual(calls, ["discover", "discover"]);
-  await reopened.stop(); await next;
-  await assert.rejects(reopened.defer(), /MIGRATION_DECISION_INVALID/u);
+  await reopened.stop();
 });
 
 test("检测成功选择稍后也不恢复旧账号或交付旧登录", async t => {
@@ -198,14 +200,15 @@ for (const scenario of ["unsafe", "journal", "bound", "stage"] as const) {
 }
 
 test("暂缓执行前重新检查磁盘迁移记录，拒绝检测后出现的日志", async t => {
-  const f = await fixture(t, async () => { throw Object.assign(new Error("offline"), { code: "SOURCE_ACCOUNT_UNRESOLVED" }); });
-  const owner = createLegacyClientMigration(f), waiting = assert.rejects(owner.prepare(), /MIGRATION_STOPPED/u);
+  const f = await fixture(t, async () => ({ candidateId: "source-1", workspaceCount: 1 }));
+  const owner = createLegacyClientMigration(f), waiting = owner.prepare();
   await owner.whenDiscovered();
+  assert.equal(owner.snapshot().status, "available");
   assert.equal(owner.snapshot().canDefer, true);
   await fs.writeFile(path.join(f.dataDir, "legacy-client-migration-journal.json"), "{}");
   assert.equal(owner.snapshot().canDefer, false);
   await assert.rejects(owner.defer(), /MIGRATION_DECISION_INVALID/u);
-  await owner.stop(); await waiting;
+  await owner.stop(); await assert.rejects(waiting, /MIGRATION_STOPPED/u);
 });
 
 test("最终复核：迁移未绑定的历史取消记录沿正常Client配置身份恢复", async t => {

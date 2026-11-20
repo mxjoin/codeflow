@@ -159,9 +159,16 @@ export function createLegacyClientMigration(input: {
           else state = { ...state, status: "available" };
           publish();
         } catch (error) {
-          log(error, errorCode(error, "MIGRATION_DISCOVERY_FAILED"), "discover");
-          state = { ...state, status: "failed", errorCode: errorCode(error, "MIGRATION_DISCOVERY_FAILED"), message: "无法检查旧 Client 数据，原数据保留。请退出后重试。" };
-          if (canDefer()) state.message = "旧 Server 暂不可用或旧账号无法确认。您可以暂不迁移，进入新桌面登录；旧数据保持原样，下次启动重新检测。";
+          const code = errorCode(error, "MIGRATION_DISCOVERY_FAILED");
+          log(error, code, "discover");
+          state = { ...state, status: "failed", errorCode: code };
+          if (code === "SOURCE_ACCOUNT_UNRESOLVED" && canDefer()) {
+            state = { ...state, status: "running", stage: "runtime_starting", candidateId: null, workspaceCount: 0,
+              completed: 0, total: null, errorCode: code,
+              message: "旧 Client 所属 Server 暂不可用，旧数据已保留；未迁移旧数据，新桌面将继续启动。" };
+            publish(); release(); return;
+          }
+          state = { ...state, status: "failed", errorCode: code, message: "无法检查旧 Client 数据，原数据保留。请退出后重试。" };
           publish();
         } finally { discovered(); }
         await gate;
@@ -344,7 +351,9 @@ async function restoreMigrationAccount(input: { dataDir: string; identity: Devic
   ws.protocol = ws.protocol === "wss:" ? "https:" : "http:";
   const serverOrigin = ws.origin;
   const signal = AbortSignal.timeout(30_000);
-  await createDesktopUpdateTransport({ ...input, configuredServerOrigin: serverOrigin }).register({ signal });
+  // 迁移发生在运行时就绪前，没有可上报的资源版本；固定 unknown 以满足新登记协议。
+  await createDesktopUpdateTransport({ ...input, configuredServerOrigin: serverOrigin,
+    getVersions: () => ({ shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" }) }).register({ signal });
   const unsigned = { schemaVersion: 1 as const, migrationId: record.migrationId!, sourceClientId: source.sourceClientId,
     targetClientId: record.targetClientId, deviceId: input.identity.deviceId, publicKey: input.identity.publicKeyBase64,
     timestamp: Date.now(), nonce: record.nonce };

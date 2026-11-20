@@ -174,7 +174,8 @@ test("registration and discovery share a signed request ID then bind one verifie
   assert.equal(result.status, "target"); assert.deepEqual(result.manifest, f.manifest);
   assert.deepEqual(f.calls.map(call => call.path), ["/api/software/desktop/devices/register", "/api/software/desktop/shell-release-availability"]);
   assert.ok(f.calls.every(call => call.requestId === f.initial.requestId));
-  assert.deepEqual(f.calls[0]!.body, { deviceId: f.identity.deviceId, publicKeyBase64: f.identity.publicKeyBase64, platform: "win32", arch: "x64" });
+  assert.deepEqual(f.calls[0]!.body, { deviceId: f.identity.deviceId, publicKeyBase64: f.identity.publicKeyBase64, platform: "win32", arch: "x64",
+    shellVersion: "unknown", webVersion: "unknown", clientVersion: "unknown", releaseId: "unknown" });
   assert.deepEqual(result.attempt.target, { shellId: "shell-next", manifestSha256: crypto.createHash("sha256").update(JSON.stringify(f.manifest)).digest("hex"), installerSha256: "a".repeat(64), installerSize: 123 });
   assert.deepEqual(result.attempt.candidateState, { activeShellId: "shell-next", previousShellId: "shell-current", baselineShellId: "installation" });
   assert.equal(result.attempt.phase, "preparing");

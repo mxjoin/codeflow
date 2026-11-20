@@ -32,6 +32,13 @@ export const KNOWLEDGE_CATEGORIES = [
 ] as const;
 export type KnowledgeCategory = typeof KNOWLEDGE_CATEGORIES[number]["category"];
 
+/** 实际提供给引擎的正式规格；引用正文以当次读取指纹为准。 */
+export type KnowledgeSpecificationRules = {
+  paths?: string[];
+  rules: Array<{ nodeId: string; title: string; appliesTo: string[]; content: string; path: string; contentHash: string; revisionId: string | null }>;
+  scoped: Array<{ nodeId: string; title: string; appliesTo: string[] }>;
+};
+
 export const KNOWLEDGE_ASSET_ERROR_CODES = [
   "KNOWLEDGE_ASSET_CONFLICT",
   "KNOWLEDGE_ASSET_ENGINE_FAILED",

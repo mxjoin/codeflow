@@ -241,11 +241,38 @@ for (const defect of ['hardlink', 'unknown', 'corrupt', 'unfinished'] as const) 
     requestId: 'review:unfinished', dataDir: f.dataDir, clientId: targetClientId, oldDeviceId: targetDeviceId, nextDeviceId: crypto.randomUUID() }), /MIGRATION_NOT_COMPLETED/u);
 });
 
-test('已下线表含实际正文时明确拒绝，不把旧笔记或资产正文丢弃后报成功', async t => {
-  const f = fixture(t, initializeLegacy83), { discoverLegacyClientMigration } = await service();
+test('退役笔记与资产同步状态不导入新库，其他工作区数据迁移且旧库保留', async t => {
+  const f = fixture(t, initializeLegacy83), { discoverLegacyClientMigration, migrateLegacyClientMigration } = await service();
   f.db.prepare("INSERT INTO notes(id,workspace_id,title,content,created_at,updated_at) VALUES('note','old-client:one','笔记','必须保留',1,1)").run();
-  await assert.rejects(discoverLegacyClientMigration(f.input, f.dependencies), { code: 'SOURCE_RETIRED_DATA_UNSUPPORTED', table: 'notes' });
-  assert.deepEqual(fs.readdirSync(f.dataDir), []);
+  f.db.prepare('INSERT INTO orch_asset_bundle_sync(workspace_id,bundle_id,bundle_version,synced_at) VALUES(?,?,?,?)')
+    .run('old-client:one', 'bundle', 7, 123);
+  history(f.db);
+  f.db.prepare("INSERT INTO engine_events VALUES(702,'thread','old-client:one','codex','message.user','{}',1)").run();
+  f.db.prepare("INSERT INTO conversation_items VALUES('old-item','thread','message','{}',1,1,1)").run();
+  const candidate = await discoverLegacyClientMigration(f.input, f.dependencies);
+  assert.ok(candidate.candidateId);
+  const migrationId = crypto.randomUUID();
+  await migrateLegacyClientMigration({ ...f.input, candidateId: candidate.candidateId!, migrationId }, f.dependencies);
+
+  const migratedApp = f.open(path.join(f.dataDir, 'codeflowai.db'));
+  for (const table of ['notes', 'orch_asset_bundle_sync', 'engine_events', 'conversation_items']) {
+    assert.equal(migratedApp.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), undefined,
+      `${table} remained in target schema ${migratedApp.pragma('user_version', { simple: true })}`);
+  }
+  const migratedWorkspace = f.open(path.join(f.workspacePath, '.codeflow', 'workspace.db'));
+  assert.equal((migratedWorkspace.prepare('SELECT count(*) AS count FROM threads').get() as { count: number }).count, 1);
+  assert.equal((migratedWorkspace.prepare('SELECT count(*) AS count FROM conversation_events').get() as { count: number }).count, 1);
+
+  const journal = JSON.parse(fs.readFileSync(path.join(f.dataDir, 'legacy-client-migration-journal.json'), 'utf8'));
+  const sourceSnapshot = f.open(path.join(f.dataDir, 'legacy-client-migration', migrationId, journal.snapshotGeneration, 'source-application.db'));
+  assert.equal((sourceSnapshot.prepare('SELECT count(*) AS count FROM notes').get() as { count: number }).count, 1);
+  assert.equal((sourceSnapshot.prepare('SELECT count(*) AS count FROM orch_asset_bundle_sync').get() as { count: number }).count, 1);
+  assert.equal((sourceSnapshot.prepare('SELECT count(*) AS count FROM engine_events').get() as { count: number }).count, 1);
+  assert.equal((sourceSnapshot.prepare('SELECT count(*) AS count FROM conversation_items').get() as { count: number }).count, 1);
+  assert.equal((f.db.prepare('SELECT count(*) AS count FROM notes').get() as { count: number }).count, 1);
+  assert.equal((f.db.prepare('SELECT count(*) AS count FROM orch_asset_bundle_sync').get() as { count: number }).count, 1);
+  assert.equal((f.db.prepare('SELECT count(*) AS count FROM engine_events').get() as { count: number }).count, 1);
+  assert.equal((f.db.prepare('SELECT count(*) AS count FROM conversation_items').get() as { count: number }).count, 1);
 });
 
 test('Attempt和代码归因结构化引用重算原有摘要规则，投递保持暂停', async t => {
@@ -311,21 +338,6 @@ test('复核修正：被最新快照合法替代的旧diff仍可迁移', async t
   assert.deepEqual(work.prepare('SELECT seq FROM conversation_events ORDER BY seq').all(), [{ seq: 698 }, { seq: 700 }]);
   assert.equal((work.prepare('SELECT diff_text FROM conversation_diff_snapshots').get() as { diff_text: string }).diff_text, '最新diff正文');
 });
-
-for (const table of ['engine_events', 'conversation_items'] as const) {
-  test(`复核修正：分库非空${table}不允许遗漏后报完成`, async t => {
-    const f = fixture(t), { discoverLegacyClientMigration, migrateLegacyClientMigration } = await service();
-    const directory = path.join(f.workspacePath, '.codeflow'); fs.mkdirSync(directory);
-    const filename = path.join(directory, 'workspace.db'); fs.writeFileSync(filename, ''); const work = f.open(filename);
-    migrateClientDb(work, { scope: 'workspace' }); ensureWorkspaceCoreQueueTables(work); ensureWorkspaceAdditionalTables(work); history(work);
-    work.exec((f.db.prepare('SELECT sql FROM sqlite_master WHERE type=\'table\' AND name=?').get(table) as { sql: string }).sql);
-    if (table === 'engine_events') work.prepare("INSERT INTO engine_events VALUES(702,'thread','old-client:one','codex','message.user','{}',1)").run();
-    else work.prepare("INSERT INTO conversation_items VALUES('old-item','thread','message','{}',1,1,1)").run();
-    work.close(); const original = fs.readFileSync(filename), candidate = await discoverLegacyClientMigration(f.input, f.dependencies);
-    await assert.rejects(migrateLegacyClientMigration({ ...f.input, candidateId: candidate.candidateId!, migrationId: crypto.randomUUID() }, f.dependencies), { code: 'SOURCE_LEGACY_HISTORY_UNSUPPORTED' });
-    assert.deepEqual(fs.readFileSync(filename), original); assert.equal(fs.existsSync(path.join(f.dataDir, 'codeflowai.db')), false);
-  });
-}
 
 for (const status of ['waiting-approval', 'waiting-feedback'] as const) {
   test(`复核修正：${status}编排暂停且保留恢复事实`, async t => {
